@@ -10,7 +10,6 @@ fetch/api/basic > should pass request-headers-case.any.js tests
 fetch/api/basic > should pass request-referrer.any.js tests
 streams/transferable > should pass transform-stream-members.any.js tests
 streams/transform-streams > should pass strategies.any.js tests
-streams/transform-streams > should pass terminate.any.js tests
 third_party/test262/test/intl402/Temporal/ZonedDateTime > should pass canonicalize-calendar.js tests
 third_party/test262/test/intl402/Temporal/ZonedDateTime > should pass construct-non-utc-non-iso.js tests
 third_party/test262/test/intl402/Temporal/ZonedDateTime > should pass links.js tests

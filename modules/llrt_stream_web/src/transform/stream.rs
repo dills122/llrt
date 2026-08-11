@@ -7,12 +7,16 @@ use rquickjs::{
 
 use crate::{
     queuing_strategy::QueuingStrategy,
-    readable::stream::{
-        algorithms::{CancelAlgorithm, PullAlgorithm, StartAlgorithm},
-        ReadableStream,
+    readable::{
+        readable_stream_default_controller_error_stream,
+        stream::{
+            algorithms::{CancelAlgorithm, PullAlgorithm, StartAlgorithm},
+            ReadableStream, ReadableStreamState,
+        },
+        ReadableStreamControllerClass, ReadableStreamDefaultControllerClass,
     },
     utils::promise::ResolveablePromise,
-    writable::WritableStream,
+    writable::{WritableStream, WritableStreamState},
 };
 
 use super::{
@@ -203,6 +207,52 @@ impl<'js> TransformStream<'js> {
     }
 }
 
+impl<'js> TransformStream<'js> {
+    // Return owned handles so callers can release the TransformStream borrow
+    // before invoking operations that may run JavaScript.
+    pub(super) fn readable_default_controller(
+        &self,
+    ) -> Option<ReadableStreamDefaultControllerClass<'js>> {
+        self.readable.as_ref().and_then(|readable| {
+            let readable = readable.borrow();
+            match &readable.controller {
+                ReadableStreamControllerClass::ReadableStreamDefaultController(controller) => {
+                    Some(controller.clone())
+                },
+                _ => None,
+            }
+        })
+    }
+
+    pub(super) fn readable_stored_error(&self) -> Option<Value<'js>> {
+        self.readable.as_ref().and_then(|readable| {
+            let readable = readable.borrow();
+            match &readable.state {
+                ReadableStreamState::Errored(error) => Some(error.clone()),
+                _ => None,
+            }
+        })
+    }
+
+    fn writable_stored_error(&self) -> Option<Value<'js>> {
+        self.writable
+            .as_ref()
+            .and_then(|writable| writable.borrow().stored_error())
+    }
+
+    // Unlike writable_stored_error(), the finalization algorithms must only
+    // prefer the stored error after the writable has reached `Errored`.
+    fn writable_stored_error_if_errored(&self) -> Option<Value<'js>> {
+        self.writable.as_ref().and_then(|writable| {
+            let writable = writable.borrow();
+            match &writable.state {
+                WritableStreamState::Errored(error) => Some(error.clone()),
+                _ => None,
+            }
+        })
+    }
+}
+
 // --- Sink algorithms ---
 
 pub(crate) fn sink_write_algorithm<'js>(
@@ -213,26 +263,31 @@ pub(crate) fn sink_write_algorithm<'js>(
 ) -> Result<Promise<'js>> {
     let stream = stream_class.borrow();
     if stream.backpressure {
-        let bp_promise = stream
+        let backpressure_promise = stream
             .backpressure_change_promise
             .as_ref()
             .map(|p| p.promise.clone());
         drop(stream);
 
-        if let Some(bp_promise) = bp_promise {
-            let sc = stream_class.clone();
-            let cc = controller_class.clone();
+        if let Some(backpressure_promise) = backpressure_promise {
+            let stream_class = stream_class.clone();
+            let controller_class = controller_class.clone();
             return crate::utils::promise::upon_promise::<Value<'js>, _>(
                 ctx.clone(),
-                bp_promise,
+                backpressure_promise,
                 move |ctx, _| {
-                    let p = controller::transform_stream_default_controller_perform_transform(
-                        ctx.clone(),
-                        &sc,
-                        &cc,
-                        chunk,
-                    )?;
-                    Ok(p.into_value())
+                    let stored_error = stream_class.borrow().writable_stored_error();
+                    if let Some(stored_error) = stored_error {
+                        return Err(ctx.throw(stored_error));
+                    }
+                    let transform_promise =
+                        controller::transform_stream_default_controller_perform_transform(
+                            ctx.clone(),
+                            &stream_class,
+                            &controller_class,
+                            chunk,
+                        )?;
+                    Ok(transform_promise.into_value())
                 },
             );
         }
@@ -253,68 +308,108 @@ pub(crate) fn sink_close_algorithm<'js>(
     stream_class: &TransformStreamClass<'js>,
     controller_class: &TransformStreamDefaultControllerClass<'js>,
 ) -> Result<Promise<'js>> {
-    let flush_promise = controller::perform_flush(ctx.clone(), stream_class, controller_class)?;
+    if let Some(finish_promise) = existing_finish_promise(controller_class) {
+        return Ok(finish_promise);
+    }
 
-    let sc = stream_class.clone();
-    let cc = controller_class.clone();
-    crate::utils::promise::upon_promise::<Value<'js>, _>(
+    let (finish, finish_promise) = start_finish(&ctx, controller_class)?;
+
+    let flush_promise = controller::perform_flush(ctx.clone(), controller_class)?;
+    controller_class.borrow_mut().clear_algorithms();
+
+    let stream_class = stream_class.clone();
+    let _ = crate::utils::promise::upon_promise::<Value<'js>, _>(
         ctx.clone(),
         flush_promise,
         move |ctx, result| {
-            cc.borrow_mut().clear_algorithms();
             match result {
                 Ok(_) => {
-                    let mut stream = sc.borrow_mut();
+                    let stored_error = stream_class.borrow().readable_stored_error();
+                    if let Some(error) = stored_error {
+                        finish.reject(error)?;
+                        return Ok(());
+                    }
+
+                    let mut stream = stream_class.borrow_mut();
                     // Resolve any pending backpressure promise to break the cycle
-                    if let Some(ref bp) = stream.backpressure_change_promise {
-                        bp.resolve_undefined()?;
+                    if let Some(backpressure_promise) = &stream.backpressure_change_promise {
+                        backpressure_promise.resolve_undefined()?;
                     }
                     stream.backpressure_change_promise = None;
-                    let readable_controller = stream.readable.as_ref().and_then(|readable| {
-                        let r = readable.borrow();
-                        if let crate::readable::ReadableStreamControllerClass::ReadableStreamDefaultController(c) = &r.controller {
-                            Some(c.clone())
-                        } else {
-                            None
-                        }
-                    });
                     drop(stream);
-                    if let Some(c) = readable_controller {
-                        crate::readable::readable_stream_default_controller_close_stream(
-                            ctx.clone(),
-                            c,
-                        )?;
-                    }
-                    Ok(Value::new_undefined(ctx))
+
+                    let readable_controller =
+                        require_readable_default_controller(&ctx, &stream_class)?;
+                    crate::readable::readable_stream_default_controller_close_stream(
+                        ctx.clone(),
+                        readable_controller,
+                    )?;
+                    finish.resolve_undefined()?;
                 },
-                Err(r) => {
-                    controller::transform_stream_error(ctx.clone(), &sc, r.clone())?;
-                    Err(ctx.throw(r))
+                Err(reason) => {
+                    let stored_error = stream_class.borrow().readable_stored_error();
+                    if let Some(error) = stored_error {
+                        finish.reject(error)?;
+                    } else {
+                        error_readable(&ctx, &stream_class, reason.clone())?;
+                        finish.reject(reason)?;
+                    }
                 },
             }
+
+            Ok(())
         },
-    )
+    )?;
+
+    Ok(finish_promise)
 }
 
 pub(crate) fn sink_abort_algorithm<'js>(
     ctx: Ctx<'js>,
+    stream_class: &TransformStreamClass<'js>,
     controller_class: &TransformStreamDefaultControllerClass<'js>,
     reason: Value<'js>,
 ) -> Result<Promise<'js>> {
-    let cancel_promise = controller::perform_cancel(ctx.clone(), controller_class, reason)?;
+    if let Some(finish_promise) = existing_finish_promise(controller_class) {
+        return Ok(finish_promise);
+    }
 
-    let cc = controller_class.clone();
-    crate::utils::promise::upon_promise::<Value<'js>, _>(
+    let (finish, finish_promise) = start_finish(&ctx, controller_class)?;
+
+    let cancel_promise = controller::perform_cancel(ctx.clone(), controller_class, reason.clone())?;
+    controller_class.borrow_mut().clear_algorithms();
+
+    let stream_class = stream_class.clone();
+    let _ = crate::utils::promise::upon_promise::<Value<'js>, _>(
         ctx.clone(),
         cancel_promise,
         move |ctx, result| {
-            cc.borrow_mut().clear_algorithms();
             match result {
-                Ok(_) => Ok(Value::new_undefined(ctx)),
-                Err(r) => Err(ctx.throw(r)),
+                Ok(_) => {
+                    let stored_error = stream_class.borrow().readable_stored_error();
+                    if let Some(error) = stored_error {
+                        finish.reject(error)?;
+                    } else {
+                        error_readable(&ctx, &stream_class, reason)?;
+                        finish.resolve_undefined()?;
+                    }
+                },
+                Err(error) => {
+                    let stored_error = stream_class.borrow().readable_stored_error();
+                    if let Some(stored_error) = stored_error {
+                        finish.reject(stored_error)?;
+                    } else {
+                        error_readable(&ctx, &stream_class, error.clone())?;
+                        finish.reject(error)?;
+                    }
+                },
             }
+
+            Ok(())
         },
-    )
+    )?;
+
+    Ok(finish_promise)
 }
 
 // --- Source algorithms ---
@@ -332,20 +427,97 @@ pub(crate) fn source_cancel_algorithm<'js>(
     controller_class: &TransformStreamDefaultControllerClass<'js>,
     reason: Value<'js>,
 ) -> Result<Promise<'js>> {
-    let cancel_promise = controller::perform_cancel(ctx.clone(), controller_class, reason.clone())?;
+    if let Some(finish_promise) = existing_finish_promise(controller_class) {
+        return Ok(finish_promise);
+    }
 
-    let sc = stream_class.clone();
-    let cc = controller_class.clone();
-    crate::utils::promise::upon_promise::<Value<'js>, _>(
+    let (finish, finish_promise) = start_finish(&ctx, controller_class)?;
+
+    let cancel_promise = controller::perform_cancel(ctx.clone(), controller_class, reason.clone())?;
+    controller_class.borrow_mut().clear_algorithms();
+
+    let stream_class = stream_class.clone();
+    let _ = crate::utils::promise::upon_promise::<Value<'js>, _>(
         ctx.clone(),
         cancel_promise,
         move |ctx, result| {
-            cc.borrow_mut().clear_algorithms();
-            controller::transform_stream_error_writable_and_unblock_write(&sc, reason)?;
             match result {
-                Ok(_) => Ok(Value::new_undefined(ctx)),
-                Err(r) => Err(ctx.throw(r)),
+                Ok(_) => {
+                    let stored_error = stream_class.borrow().writable_stored_error_if_errored();
+                    if let Some(error) = stored_error {
+                        finish.reject(error)?;
+                        return Ok(());
+                    }
+
+                    controller::transform_stream_error_writable_and_unblock_write(
+                        ctx.clone(),
+                        &stream_class,
+                        reason,
+                    )?;
+                    finish.resolve_undefined()?;
+                },
+                Err(error) => {
+                    let stored_error = stream_class.borrow().writable_stored_error_if_errored();
+                    if let Some(stored_error) = stored_error {
+                        finish.reject(stored_error)?;
+                    } else {
+                        controller::transform_stream_error_writable_and_unblock_write(
+                            ctx.clone(),
+                            &stream_class,
+                            error.clone(),
+                        )?;
+                        finish.reject(error)?;
+                    }
+                },
             }
+
+            Ok(())
         },
-    )
+    )?;
+
+    Ok(finish_promise)
+}
+
+fn existing_finish_promise<'js>(
+    controller_class: &TransformStreamDefaultControllerClass<'js>,
+) -> Option<Promise<'js>> {
+    controller_class
+        .borrow()
+        .finish_promise
+        .as_ref()
+        .map(|finish| finish.promise.clone())
+}
+
+fn start_finish<'js>(
+    ctx: &Ctx<'js>,
+    controller_class: &TransformStreamDefaultControllerClass<'js>,
+) -> Result<(ResolveablePromise<'js>, Promise<'js>)> {
+    let finish = ResolveablePromise::new(ctx)?;
+    let finish_promise = finish.promise.clone();
+
+    // This must be stored before flush() or cancel() invokes user code so a
+    // reentrant close, abort, or cancel returns the same promise.
+    controller_class.borrow_mut().finish_promise = Some(finish.clone());
+
+    Ok((finish, finish_promise))
+}
+
+fn require_readable_default_controller<'js>(
+    ctx: &Ctx<'js>,
+    stream_class: &TransformStreamClass<'js>,
+) -> Result<ReadableStreamDefaultControllerClass<'js>> {
+    stream_class
+        .borrow()
+        .readable_default_controller()
+        .ok_or_else(|| Exception::throw_type(ctx, "readable controller not available"))
+}
+
+fn error_readable<'js>(
+    ctx: &Ctx<'js>,
+    stream_class: &TransformStreamClass<'js>,
+    error: Value<'js>,
+) -> Result<()> {
+    let readable_controller = require_readable_default_controller(ctx, stream_class)?;
+
+    readable_stream_default_controller_error_stream(readable_controller, error)
 }

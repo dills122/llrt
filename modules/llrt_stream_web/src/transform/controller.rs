@@ -1,19 +1,20 @@
 use rquickjs::{
     class::{OwnedBorrowMut, Trace},
     prelude::{Opt, This},
-    Class, Ctx, Exception, Function, JsLifetime, Object, Promise, Result, Value,
+    Class, Ctx, Error, Exception, Function, JsLifetime, Object, Promise, Result, Value,
 };
 
 use crate::{
     readable::{
         readable_stream_default_controller_close_stream,
         readable_stream_default_controller_enqueue_value,
-        readable_stream_default_controller_error_stream, ReadableStreamDefaultControllerClass,
+        readable_stream_default_controller_error_stream,
     },
-    utils::promise::{promise_resolved_with, ResolveablePromise},
+    utils::promise::{promise_resolved_with, upon_promise, ResolveablePromise},
+    writable::writable_stream_default_controller_error_if_needed,
 };
 
-use llrt_utils::primordials::Primordial;
+use llrt_utils::primordials::{BasePrimordials, Primordial};
 
 use super::stream::TransformStreamClass;
 
@@ -29,20 +30,6 @@ pub(crate) struct TransformStreamDefaultController<'js> {
 
 pub(crate) type TransformStreamDefaultControllerClass<'js> =
     Class<'js, TransformStreamDefaultController<'js>>;
-
-fn get_readable_default_controller<'js>(
-    stream_class: &TransformStreamClass<'js>,
-) -> Option<ReadableStreamDefaultControllerClass<'js>> {
-    let stream = stream_class.borrow();
-    let readable = stream.readable.as_ref()?;
-    let readable = readable.borrow();
-    match &readable.controller {
-        crate::readable::ReadableStreamControllerClass::ReadableStreamDefaultController(c) => {
-            Some(c.clone())
-        },
-        _ => None,
-    }
-}
 
 #[rquickjs::methods(rename_all = "camelCase")]
 impl<'js> TransformStreamDefaultController<'js> {
@@ -139,10 +126,51 @@ pub(super) fn transform_stream_default_controller_enqueue<'js>(
     stream_class: &TransformStreamClass<'js>,
     chunk: Value<'js>,
 ) -> Result<()> {
-    let controller_class = get_readable_default_controller(stream_class)
+    let controller_class = stream_class
+        .borrow()
+        .readable_default_controller()
         .ok_or_else(|| Exception::throw_type(&ctx, "readable controller not available"))?;
 
-    readable_stream_default_controller_enqueue_value(ctx.clone(), controller_class.clone(), chunk)?;
+    let can_enqueue = {
+        let stream = stream_class.borrow();
+        let readable_class = stream
+            .readable
+            .as_ref()
+            .ok_or_else(|| Exception::throw_type(&ctx, "readable stream not available"))?;
+        let readable = readable_class.borrow();
+        controller_class
+            .borrow()
+            .readable_stream_default_controller_can_close_or_enqueue(&readable)
+    };
+    if !can_enqueue {
+        return Err(Exception::throw_type(
+            &ctx,
+            "The stream is not in a state that permits enqueue",
+        ));
+    }
+
+    if let Err(err) = readable_stream_default_controller_enqueue_value(
+        ctx.clone(),
+        controller_class.clone(),
+        chunk,
+    ) {
+        if let Error::Exception = err {
+            let reason = ctx.catch();
+            transform_stream_error_writable_and_unblock_write(
+                ctx.clone(),
+                stream_class,
+                reason.clone(),
+            )?;
+            let stored_error = stream_class
+                .borrow()
+                .readable_stored_error()
+                .ok_or_else(|| {
+                    Exception::throw_type(&ctx, "readable enqueue failed without a stored error")
+                })?;
+            return Err(ctx.throw(stored_error));
+        }
+        return Err(err);
+    }
 
     // Update backpressure
     let has_backpressure = {
@@ -166,13 +194,16 @@ pub(super) fn transform_stream_default_controller_terminate<'js>(
     ctx: Ctx<'js>,
     stream_class: &TransformStreamClass<'js>,
 ) -> Result<()> {
-    let controller_class = get_readable_default_controller(stream_class)
+    let controller_class = stream_class
+        .borrow()
+        .readable_default_controller()
         .ok_or_else(|| Exception::throw_type(&ctx, "readable controller not available"))?;
 
     readable_stream_default_controller_close_stream(ctx.clone(), controller_class)?;
 
-    let error = ctx.eval::<Value, _>("new TypeError('TransformStream terminated')")?;
-    transform_stream_error_writable_and_unblock_write(stream_class, error)?;
+    let constructor_type_error = BasePrimordials::get(&ctx)?.constructor_type_error.clone();
+    let error: Value = constructor_type_error.call(("TransformStream terminated",))?;
+    transform_stream_error_writable_and_unblock_write(ctx, stream_class, error)?;
     Ok(())
 }
 
@@ -181,28 +212,54 @@ pub(super) fn transform_stream_error<'js>(
     stream_class: &TransformStreamClass<'js>,
     e: Value<'js>,
 ) -> Result<()> {
-    let controller_class = get_readable_default_controller(stream_class)
+    let controller_class = stream_class
+        .borrow()
+        .readable_default_controller()
         .ok_or_else(|| Exception::throw_type(&ctx, "readable controller not available"))?;
 
     readable_stream_default_controller_error_stream(controller_class, e.clone())?;
-    transform_stream_error_writable_and_unblock_write(stream_class, e)?;
+    transform_stream_error_writable_and_unblock_write(ctx, stream_class, e)?;
     Ok(())
 }
 
 pub(super) fn transform_stream_error_writable_and_unblock_write<'js>(
+    ctx: Ctx<'js>,
     stream_class: &TransformStreamClass<'js>,
-    _e: Value<'js>,
+    e: Value<'js>,
 ) -> Result<()> {
-    let mut stream = stream_class.borrow_mut();
-    if let Some(ref controller_class) = stream.controller {
+    let (controller_class, writable_class) = {
+        let stream = stream_class.borrow();
+        (stream.controller.clone(), stream.writable.clone())
+    };
+
+    if let Some(controller_class) = controller_class {
         controller_class.borrow_mut().clear_algorithms();
     }
-    // Always resolve and clear backpressure promise to break reference cycles
-    if let Some(ref bp) = stream.backpressure_change_promise {
-        bp.resolve_undefined()?;
+
+    if let Some(writable_class) = writable_class {
+        let writable_controller = writable_class.borrow().controller.clone();
+        if let Some(writable_controller) = writable_controller {
+            writable_stream_default_controller_error_if_needed(
+                ctx.clone(),
+                writable_controller,
+                e,
+            )?;
+        }
     }
-    stream.backpressure_change_promise = None;
-    stream.backpressure = false;
+
+    {
+        let mut stream = stream_class.borrow_mut();
+        // The specification replaces this promise when unblocking a write. LLRT
+        // clears it after resolving instead because no further writes can run
+        // once the writable side is erroring, and retaining the replacement
+        // promise would keep the QuickJS object cycle alive.
+        if let Some(backpressure_change_promise) = &stream.backpressure_change_promise {
+            backpressure_change_promise.resolve_undefined()?;
+        }
+        stream.backpressure_change_promise = None;
+        stream.backpressure = false;
+    }
+
     Ok(())
 }
 
@@ -254,12 +311,22 @@ pub(super) fn transform_stream_default_controller_perform_transform<'js>(
         },
     };
 
-    Ok(transform_promise)
+    let stream_class = stream_class.clone();
+    upon_promise::<Value<'js>, _>(
+        ctx.clone(),
+        transform_promise,
+        move |ctx, result| match result {
+            Ok(value) => Ok(value),
+            Err(reason) => {
+                transform_stream_error(ctx.clone(), &stream_class, reason.clone())?;
+                Err(ctx.throw(reason))
+            },
+        },
+    )
 }
 
 pub(super) fn perform_flush<'js>(
     ctx: Ctx<'js>,
-    _stream_class: &TransformStreamClass<'js>,
     controller_class: &TransformStreamDefaultControllerClass<'js>,
 ) -> Result<Promise<'js>> {
     let controller = controller_class.borrow();

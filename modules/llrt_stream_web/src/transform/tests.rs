@@ -309,6 +309,558 @@ async fn error_propagates_to_reader() {
 }
 
 #[tokio::test]
+async fn caught_enqueue_size_error_still_errors_writable() {
+    test_async_with(|ctx| {
+        crate::init(&ctx).unwrap();
+        Box::pin(async move {
+            eval_async(
+                &ctx,
+                r#"
+                const ts = new TransformStream({
+                    transform(chunk, controller) {
+                        try {
+                            controller.enqueue(chunk);
+                            throw new Error("enqueue should have thrown");
+                        } catch (error) {
+                            if (!(error instanceof RangeError)) throw error;
+                            enqueueError = error;
+                        }
+                    }
+                }, undefined, {
+                    size() { return -1; },
+                    highWaterMark: 1
+                });
+                const writer = ts.writable.getWriter();
+                const reader = ts.readable.getReader();
+                let enqueueError;
+
+                const rejectsWithEnqueueError = promise => promise.then(
+                    () => { throw new Error("stream promise should have rejected"); },
+                    reason => {
+                        if (reason !== enqueueError) throw reason;
+                    }
+                );
+                const rejectionChecks = [writer.closed, reader.closed]
+                    .map(rejectsWithEnqueueError);
+
+                await writer.write("x");
+                await Promise.all([
+                    rejectsWithEnqueueError(writer.ready),
+                    ...rejectionChecks
+                ]);
+            "#,
+            )
+            .unwrap()
+            .into_future::<()>()
+            .await
+            .unwrap();
+        })
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn enqueue_throws_readable_stored_error() {
+    test_async_with(|ctx| {
+        crate::init(&ctx).unwrap();
+        Box::pin(async move {
+            eval_async(
+                &ctx,
+                r#"
+                const storedError = new Error("stored readable error");
+                const redundantError = new Error("redundant size error");
+                let controller;
+                const ts = new TransformStream({
+                    transform(chunk, value) {
+                        controller = value;
+                        controller.enqueue(chunk);
+                    }
+                }, undefined, {
+                    size() {
+                        controller.error(storedError);
+                        throw redundantError;
+                    },
+                    highWaterMark: 1
+                });
+                const writer = ts.writable.getWriter();
+                const reader = ts.readable.getReader();
+
+                const rejectsExactly = promise => promise.then(
+                    () => { throw new Error("stream promise should have rejected"); },
+                    reason => {
+                        if (reason !== storedError) throw reason;
+                    }
+                );
+
+                await Promise.all([
+                    rejectsExactly(writer.write("x")),
+                    rejectsExactly(writer.closed),
+                    rejectsExactly(reader.closed)
+                ]);
+            "#,
+            )
+            .unwrap()
+            .into_future::<()>()
+            .await
+            .unwrap();
+        })
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn writable_abort_errors_readable_with_exact_reason() {
+    test_async_with(|ctx| {
+        crate::init(&ctx).unwrap();
+        Box::pin(async move {
+            eval_async(
+                &ctx,
+                r#"
+                const abortReason = new Error("abort reason");
+                let cancelReason;
+                const ts = new TransformStream({
+                    cancel(reason) { cancelReason = reason; }
+                });
+                const reader = ts.readable.getReader();
+                const readableResult = reader.closed.then(
+                    () => { throw new Error("reader.closed should have rejected"); },
+                    reason => {
+                        if (reason !== abortReason) throw reason;
+                    }
+                );
+
+                await ts.writable.abort(abortReason);
+                if (cancelReason !== abortReason)
+                    throw new Error("cancel received the wrong reason");
+
+                const outcome = { settled: false, error: undefined };
+                readableResult.then(
+                    () => { outcome.settled = true; },
+                    error => {
+                        outcome.settled = true;
+                        outcome.error = error;
+                    }
+                );
+                for (let i = 0; i < 10 && !outcome.settled; ++i) {
+                    await Promise.resolve();
+                }
+                if (!outcome.settled) throw new Error("reader.closed remained pending");
+                if (outcome.error !== undefined) throw outcome.error;
+            "#,
+            )
+            .unwrap()
+            .into_future::<()>()
+            .await
+            .unwrap();
+        })
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn parallel_cancel_and_close_share_finish_promise() {
+    test_async_with(|ctx| {
+        crate::init(&ctx).unwrap();
+        Box::pin(async move {
+            eval_async(
+                &ctx,
+                r#"
+                const cancelReason = new Error("cancel reason");
+                const cancelError = new Error("cancel failed");
+                let flushCalls = 0;
+                const ts = new TransformStream({
+                    async cancel(reason) {
+                        if (reason !== cancelReason)
+                            throw new Error("cancel received the wrong reason");
+                        throw cancelError;
+                    },
+                    flush() { ++flushCalls; }
+                });
+
+                const cancelPromise = ts.readable.cancel(cancelReason);
+                const closePromise = ts.writable.close();
+                const rejectsExactly = promise => promise.then(
+                    () => { throw new Error("operation should have rejected"); },
+                    reason => {
+                        if (reason !== cancelError) throw reason;
+                    }
+                );
+
+                await Promise.all([
+                    rejectsExactly(cancelPromise),
+                    rejectsExactly(closePromise)
+                ]);
+                if (flushCalls !== 0) throw new Error("flush should not have been called");
+            "#,
+            )
+            .unwrap()
+            .into_future::<()>()
+            .await
+            .unwrap();
+        })
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn reentrant_cancel_runs_transformer_cancel_once() {
+    test_async_with(|ctx| {
+        crate::init(&ctx).unwrap();
+        Box::pin(async move {
+            eval_async(
+                &ctx,
+                r#"
+                const abortReason = new Error("abort reason");
+                const nestedReason = new Error("nested cancel reason");
+                let cancelCalls = 0;
+                let nestedCancel;
+                const ts = new TransformStream({
+                    cancel() {
+                        ++cancelCalls;
+                        if (cancelCalls === 1) {
+                            nestedCancel = ts.readable.cancel(nestedReason);
+                        }
+                    }
+                });
+
+                await ts.writable.abort(abortReason);
+                await nestedCancel;
+                if (cancelCalls !== 1)
+                    throw new Error("cancel should have been called exactly once");
+            "#,
+            )
+            .unwrap()
+            .into_future::<()>()
+            .await
+            .unwrap();
+        })
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn terminate_rejects_write_waiting_on_backpressure() {
+    test_async_with(|ctx| {
+        crate::init(&ctx).unwrap();
+        Box::pin(async move {
+            eval_async(
+                &ctx,
+                r#"
+                let controller;
+                const ts = new TransformStream({
+                    start(value) { controller = value; }
+                }, undefined, { highWaterMark: 0 });
+                const writer = ts.writable.getWriter();
+                const write = writer.write("blocked");
+
+                await Promise.resolve();
+                controller.terminate();
+
+                try {
+                    await write;
+                    throw new Error("write should have rejected");
+                } catch (error) {
+                    if (!(error instanceof TypeError)) throw error;
+                }
+
+                try {
+                    await writer.closed;
+                    throw new Error("writer.closed should have rejected");
+                } catch (error) {
+                    if (!(error instanceof TypeError)) throw error;
+                }
+
+                const { done } = await ts.readable.getReader().read();
+                if (!done) throw new Error("readable should have closed");
+            "#,
+            )
+            .unwrap()
+            .into_future::<()>()
+            .await
+            .unwrap();
+        })
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn synchronous_transform_error_rejects_both_sides() {
+    test_async_with(|ctx| {
+        crate::init(&ctx).unwrap();
+        Box::pin(async move {
+            eval_async(
+                &ctx,
+                r#"
+                const error = new Error("transform failed");
+                const ts = new TransformStream({
+                    transform() { throw error; }
+                }, undefined, { highWaterMark: 1 });
+                const writer = ts.writable.getWriter();
+                const reader = ts.readable.getReader();
+
+                const rejectsExactly = promise => promise.then(
+                    () => { throw new Error("stream promise should have rejected"); },
+                    reason => {
+                        if (reason !== error) throw reason;
+                    }
+                );
+                await Promise.all([
+                    rejectsExactly(writer.write("x")),
+                    rejectsExactly(writer.closed),
+                    rejectsExactly(reader.read()),
+                    rejectsExactly(reader.closed)
+                ]);
+            "#,
+            )
+            .unwrap()
+            .into_future::<()>()
+            .await
+            .unwrap();
+        })
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn asynchronous_transform_error_rejects_both_sides() {
+    test_async_with(|ctx| {
+        crate::init(&ctx).unwrap();
+        Box::pin(async move {
+            eval_async(
+                &ctx,
+                r#"
+                const error = new Error("async transform failed");
+                const ts = new TransformStream({
+                    transform() { return Promise.reject(error); }
+                }, undefined, { highWaterMark: 1 });
+                const writer = ts.writable.getWriter();
+                const reader = ts.readable.getReader();
+
+                const rejectsExactly = promise => promise.then(
+                    () => { throw new Error("stream promise should have rejected"); },
+                    reason => {
+                        if (reason !== error) throw reason;
+                    }
+                );
+                await Promise.all([
+                    rejectsExactly(writer.write("x")),
+                    rejectsExactly(writer.closed),
+                    rejectsExactly(reader.read()),
+                    rejectsExactly(reader.closed)
+                ]);
+            "#,
+            )
+            .unwrap()
+            .into_future::<()>()
+            .await
+            .unwrap();
+        })
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn controller_error_during_flush_rejects_close() {
+    test_async_with(|ctx| {
+        crate::init(&ctx).unwrap();
+        Box::pin(async move {
+            eval_async(
+                &ctx,
+                r#"
+                const error = new Error("flush failed");
+                const ts = new TransformStream({
+                    flush(controller) { controller.error(error); }
+                });
+                const writer = ts.writable.getWriter();
+                const reader = ts.readable.getReader();
+
+                const rejectsExactly = promise => promise.then(
+                    () => { throw new Error("stream promise should have rejected"); },
+                    reason => {
+                        if (reason !== error) throw reason;
+                    }
+                );
+                await Promise.all([
+                    rejectsExactly(writer.close()),
+                    rejectsExactly(writer.closed),
+                    rejectsExactly(reader.closed)
+                ]);
+            "#,
+            )
+            .unwrap()
+            .into_future::<()>()
+            .await
+            .unwrap();
+        })
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn finish_algorithms_preserve_existing_stream_error() {
+    test_async_with(|ctx| {
+        crate::init(&ctx).unwrap();
+        Box::pin(async move {
+            eval_async(
+                &ctx,
+                r#"
+                const rejectsExactly = (promise, expected) => promise.then(
+                    () => { throw new Error("operation should have rejected"); },
+                    reason => {
+                        if (reason !== expected) throw reason;
+                    }
+                );
+
+                {
+                    const storedError = new Error("readable error during flush");
+                    const redundantError = new Error("flush rejection");
+                    const ts = new TransformStream({
+                        flush(controller) {
+                            controller.error(storedError);
+                            throw redundantError;
+                        }
+                    });
+                    await rejectsExactly(ts.writable.close(), storedError);
+                }
+
+                {
+                    const storedError = new Error("readable error during abort");
+                    const redundantError = new Error("abort rejection");
+                    let controller;
+                    const ts = new TransformStream({
+                        start(value) { controller = value; },
+                        cancel() {
+                            controller.error(storedError);
+                            throw redundantError;
+                        }
+                    });
+                    await rejectsExactly(ts.writable.abort(), storedError);
+                }
+
+                {
+                    const storedError = new Error("writable error during cancel");
+                    const redundantError = new Error("cancel rejection");
+                    let controller;
+                    const ts = new TransformStream({
+                        start(value) { controller = value; },
+                        cancel() {
+                            controller.error(storedError);
+                            throw redundantError;
+                        }
+                    });
+                    await rejectsExactly(ts.readable.cancel(), storedError);
+                }
+            "#,
+            )
+            .unwrap()
+            .into_future::<()>()
+            .await
+            .unwrap();
+        })
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn fulfilled_cancel_errors_writable_with_original_reason() {
+    test_async_with(|ctx| {
+        crate::init(&ctx).unwrap();
+        Box::pin(async move {
+            eval_async(
+                &ctx,
+                r#"
+                const reason = new Error("cancelled");
+                let seenReason;
+                const ts = new TransformStream({
+                    cancel(value) { seenReason = value; }
+                });
+                const writer = ts.writable.getWriter();
+
+                await ts.readable.cancel(reason);
+                if (seenReason !== reason) throw new Error("cancel received the wrong reason");
+                try {
+                    await writer.closed;
+                    throw new Error("writer.closed should have rejected");
+                } catch (error) {
+                    if (error !== reason) throw error;
+                }
+            "#,
+            )
+            .unwrap()
+            .into_future::<()>()
+            .await
+            .unwrap();
+        })
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn rejected_cancel_errors_writable_with_rejection_reason() {
+    test_async_with(|ctx| {
+        crate::init(&ctx).unwrap();
+        Box::pin(async move {
+            eval_async(
+                &ctx,
+                r#"
+                const reason = new Error("cancelled");
+                const cancelError = new Error("cancel failed");
+                const ts = new TransformStream({
+                    cancel() { throw cancelError; }
+                });
+                const writer = ts.writable.getWriter();
+
+                const rejectsExactly = promise => promise.then(
+                    () => { throw new Error("stream promise should have rejected"); },
+                    error => {
+                        if (error !== cancelError) throw error;
+                    }
+                );
+                await Promise.all([
+                    rejectsExactly(ts.readable.cancel(reason)),
+                    rejectsExactly(writer.closed)
+                ]);
+            "#,
+            )
+            .unwrap()
+            .into_future::<()>()
+            .await
+            .unwrap();
+        })
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn enqueue_after_terminate_throws() {
+    test_async_with(|ctx| {
+        crate::init(&ctx).unwrap();
+        Box::pin(async move {
+            eval_async(
+                &ctx,
+                r#"
+                let controller;
+                new TransformStream({ start(value) { controller = value; } });
+                controller.terminate();
+
+                try {
+                    controller.enqueue("late");
+                    throw new Error("enqueue should have thrown");
+                } catch (error) {
+                    if (!(error instanceof TypeError)) throw error;
+                }
+            "#,
+            )
+            .unwrap()
+            .into_future::<()>()
+            .await
+            .unwrap();
+        })
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn start_receives_controller() {
     test_async_with(|ctx| {
         crate::init(&ctx).unwrap();
