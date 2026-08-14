@@ -210,13 +210,13 @@ impl KeyDerivation {
         let hash = extract_sha_hash(ctx, &obj)?;
 
         let salt = obj
-            .get_required::<_, ObjectBytes>("salt", "algorithm")?
-            .into_bytes(ctx)?
+            .get_required::<_, super::WebCryptoBufferSource>("salt", "algorithm")?
+            .snapshot()
             .into_boxed_slice();
 
         let info = obj
-            .get_required::<_, ObjectBytes>("info", "algorithm")?
-            .into_bytes(ctx)?
+            .get_required::<_, super::WebCryptoBufferSource>("info", "algorithm")?
+            .snapshot()
             .into_boxed_slice();
 
         Ok(KeyDerivation::Hkdf { hash, salt, info })
@@ -226,8 +226,8 @@ impl KeyDerivation {
         let hash = extract_sha_hash(ctx, &obj)?;
 
         let salt = obj
-            .get_required::<_, ObjectBytes>("salt", "algorithm")?
-            .into_bytes(ctx)?
+            .get_required::<_, super::WebCryptoBufferSource>("salt", "algorithm")?
+            .snapshot()
             .into_boxed_slice();
 
         let iterations = obj.get_required("iterations", "algorithm")?;

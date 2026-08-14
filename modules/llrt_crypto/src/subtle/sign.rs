@@ -3,7 +3,6 @@
 use std::future::Future;
 
 use crate::provider::{CryptoProvider, HmacProvider};
-use llrt_utils::bytes::ObjectBytes;
 use rquickjs::{ArrayBuffer, Class, Ctx, FromJs, Result, Value};
 
 use crate::CRYPTO_PROVIDER;
@@ -15,13 +14,14 @@ use super::{
     rsa_hash_digest,
     sign_algorithm::SigningAlgorithm,
     util::ResultDomExt,
+    WebCryptoBufferSource,
 };
 
 pub fn subtle_sign<'js>(
     ctx: Ctx<'js>,
     algorithm: Value<'js>,
     key: Class<'js, CryptoKey<'js>>,
-    data: ObjectBytes<'js>,
+    data: WebCryptoBufferSource<'js>,
 ) -> impl Future<Output = Result<ArrayBuffer<'js>>> + 'js {
     // Keep preparation outside the async block: Rust async function bodies are deferred until
     // polled, while WebCrypto requires call-time algorithm normalization and input snapshotting.
@@ -50,10 +50,10 @@ fn prepare_sign<'js>(
     ctx: &Ctx<'js>,
     algorithm: Value<'js>,
     key: Class<'js, CryptoKey<'js>>,
-    data: ObjectBytes<'js>,
+    data: WebCryptoBufferSource<'js>,
 ) -> Result<(SigningAlgorithm, Class<'js, CryptoKey<'js>>, Vec<u8>)> {
     let algorithm = SigningAlgorithm::from_js(ctx, algorithm)?;
-    let data = data.as_bytes_opt().unwrap_or_default().to_vec();
+    let data = data.snapshot();
     Ok((algorithm, key, data))
 }
 

@@ -3,7 +3,7 @@
 use std::{borrow::Cow, future::Future};
 
 use llrt_exceptions::DOMException;
-use llrt_utils::{bytes::ObjectBytes, result::ResultExt};
+use llrt_utils::result::ResultExt;
 use rquickjs::{ArrayBuffer, Class, Ctx, Exception, FromJs, Result, Value};
 
 use crate::{
@@ -16,14 +16,14 @@ use super::{
     encryption_algorithm::EncryptionAlgorithm,
     key_algorithm::{AesAlgorithm, KeyAlgorithm},
     util::ResultDomExt,
-    CryptoKey, EncryptionMode,
+    CryptoKey, EncryptionMode, WebCryptoBufferSource,
 };
 
 pub fn subtle_decrypt<'js>(
     ctx: Ctx<'js>,
     algorithm: Value<'js>,
     key: Class<'js, CryptoKey<'js>>,
-    data: ObjectBytes<'js>,
+    data: WebCryptoBufferSource<'js>,
 ) -> impl Future<Output = Result<ArrayBuffer<'js>>> + 'js {
     let prepared = prepare_encrypt_decrypt(&ctx, algorithm, key, data);
 
@@ -49,7 +49,7 @@ pub fn subtle_encrypt<'js>(
     ctx: Ctx<'js>,
     algorithm: Value<'js>,
     key: Class<'js, CryptoKey<'js>>,
-    data: ObjectBytes<'js>,
+    data: WebCryptoBufferSource<'js>,
 ) -> impl Future<Output = Result<ArrayBuffer<'js>>> + 'js {
     let prepared = prepare_encrypt_decrypt(&ctx, algorithm, key, data);
 
@@ -75,10 +75,10 @@ fn prepare_encrypt_decrypt<'js>(
     ctx: &Ctx<'js>,
     algorithm: Value<'js>,
     key: Class<'js, CryptoKey<'js>>,
-    data: ObjectBytes<'js>,
+    data: WebCryptoBufferSource<'js>,
 ) -> Result<(EncryptionAlgorithm, Class<'js, CryptoKey<'js>>, Vec<u8>)> {
     let algorithm = EncryptionAlgorithm::from_js(ctx, algorithm)?;
-    let input = data.as_bytes_opt().map(<[u8]>::to_vec).unwrap_or_default();
+    let input = data.snapshot();
     Ok((algorithm, key, input))
 }
 

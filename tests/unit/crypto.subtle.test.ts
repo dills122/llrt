@@ -9,6 +9,17 @@ const ENCODED_DATA = ENCODER.encode(TEST_MESSAGE);
 const LIMITED_CRYPTO = process.env.LLRT_LIMITED_CRYPTO === "1";
 const fullCrypto = LIMITED_CRYPTO ? describe.skip : describe;
 
+async function expectPromiseTypeError(call: () => Promise<unknown>) {
+  let result: Promise<unknown> | undefined;
+
+  expect(() => {
+    result = call();
+  }).not.toThrow();
+
+  expect(result).toBeInstanceOf(Promise);
+  await expect(result!).rejects.toBeInstanceOf(TypeError);
+}
+
 describe("SubtleCrypto digest", () => {
   it("should calculate correctly SHA-1/256/384/512 digest", async () => {
     const parameters: [string, number[]][] = [
@@ -54,6 +65,226 @@ describe("SubtleCrypto digest", () => {
 
       expect(result).toEqual(new Uint8Array(digest));
     }
+  });
+
+  for (const data of [1, "not a BufferSource"]) {
+    it(`should reject invalid BufferSource input without throwing synchronously: ${JSON.stringify(data)}`, async () => {
+      await expectPromiseTypeError(() =>
+        (crypto.subtle.digest as any)("SHA-256", data)
+      );
+    });
+  }
+});
+
+fullCrypto("SubtleCrypto WebIDL Promise boundary", () => {
+  const bytes = new Uint8Array([1, 2, 3]);
+
+  for (const [name, call] of [
+    ["digest", () => (crypto.subtle.digest as any)("SHA-256")],
+    ["sign", () => (crypto.subtle.sign as any)("HMAC")],
+  ] as [string, () => Promise<unknown>][]) {
+    it(`should reject missing ${name} arguments with TypeError without throwing synchronously`, async () => {
+      await expectPromiseTypeError(call);
+    });
+  }
+
+  for (const [name, call] of [
+    ["encrypt", () => (crypto.subtle.encrypt as any)("AES-GCM", {}, bytes)],
+    ["decrypt", () => (crypto.subtle.decrypt as any)("AES-GCM", {}, bytes)],
+    ["exportKey", () => (crypto.subtle.exportKey as any)("raw", {})],
+    [
+      "deriveBits",
+      () => (crypto.subtle.deriveBits as any)({ name: "PBKDF2" }, {}, 8),
+    ],
+    [
+      "deriveKey",
+      () =>
+        (crypto.subtle.deriveKey as any)(
+          { name: "PBKDF2" },
+          {},
+          { name: "AES-GCM", length: 128 },
+          false,
+          ["encrypt"]
+        ),
+    ],
+    ["sign", () => (crypto.subtle.sign as any)("HMAC", {}, bytes)],
+    ["verify", () => (crypto.subtle.verify as any)("HMAC", {}, bytes, bytes)],
+    ["wrapKey", () => (crypto.subtle.wrapKey as any)("raw", {}, {}, "AES-KW")],
+    [
+      "unwrapKey",
+      () =>
+        (crypto.subtle.unwrapKey as any)(
+          "raw",
+          bytes,
+          {},
+          "AES-KW",
+          { name: "AES-GCM", length: 128 },
+          false,
+          ["decrypt"]
+        ),
+    ],
+  ] as [string, () => Promise<unknown>][]) {
+    it(`should reject an invalid CryptoKey from ${name} without throwing synchronously`, async () => {
+      await expectPromiseTypeError(call);
+    });
+  }
+
+  for (const [name, signature, data] of [
+    ["signature", 1, new Uint8Array([1, 2, 3])],
+    ["data", new Uint8Array([1, 2, 3]), "not a BufferSource"],
+  ] as const) {
+    it(`should reject invalid ${name} input without throwing synchronously`, async () => {
+      const key = await crypto.subtle.generateKey(
+        { name: "HMAC", hash: "SHA-256" },
+        false,
+        ["verify"]
+      );
+      await expectPromiseTypeError(() =>
+        (crypto.subtle.verify as any)("HMAC", key, signature, data)
+      );
+    });
+  }
+
+  it("should perform Web IDL argument conversion before algorithm normalization", async () => {
+    let normalized = false;
+    const algorithm = {
+      get name() {
+        normalized = true;
+        return "HMAC";
+      },
+    };
+
+    await expectPromiseTypeError(() =>
+      (crypto.subtle.sign as any)(algorithm, {}, bytes)
+    );
+    expect(normalized).toBe(false);
+  });
+
+  it("should reject invalid encrypt/decrypt data and algorithm BufferSources", async () => {
+    const key = await crypto.subtle.generateKey(
+      { name: "AES-GCM", length: 128 },
+      false,
+      ["encrypt", "decrypt"]
+    );
+
+    await expectPromiseTypeError(() =>
+      (crypto.subtle.encrypt as any)(
+        { name: "AES-GCM", iv: new Uint8Array(12) },
+        key,
+        "not a BufferSource"
+      )
+    );
+    await expectPromiseTypeError(() =>
+      (crypto.subtle.decrypt as any)(
+        { name: "AES-GCM", iv: new Uint8Array(12) },
+        key,
+        1
+      )
+    );
+    await expectPromiseTypeError(() =>
+      (crypto.subtle.encrypt as any)(
+        { name: "AES-GCM", iv: "not a BufferSource" },
+        key,
+        bytes
+      )
+    );
+  });
+
+  it("should reject invalid sign and importKey BufferSources", async () => {
+    const key = await crypto.subtle.generateKey(
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"]
+    );
+
+    await expectPromiseTypeError(() =>
+      (crypto.subtle.sign as any)("HMAC", key, "not a BufferSource")
+    );
+    for (const format of ["raw", "pkcs8", "spki"]) {
+      await expectPromiseTypeError(() =>
+        (crypto.subtle.importKey as any)(format, 1, "AES-GCM", false, [
+          "encrypt",
+        ])
+      );
+    }
+  });
+
+  it("should reject invalid unwrapKey and derivation BufferSources", async () => {
+    const unwrappingKey = await crypto.subtle.generateKey(
+      { name: "AES-KW", length: 128 },
+      false,
+      ["unwrapKey"]
+    );
+    await expectPromiseTypeError(() =>
+      (crypto.subtle.unwrapKey as any)(
+        "raw",
+        "not a BufferSource",
+        unwrappingKey,
+        "AES-KW",
+        { name: "AES-GCM", length: 128 },
+        false,
+        ["decrypt"]
+      )
+    );
+
+    const baseKey = await crypto.subtle.importKey("raw", bytes, "HKDF", false, [
+      "deriveBits",
+    ]);
+    for (const algorithm of [
+      { name: "HKDF", hash: "SHA-256", salt: 1, info: bytes },
+      {
+        name: "HKDF",
+        hash: "SHA-256",
+        salt: bytes,
+        info: "not a BufferSource",
+      },
+    ]) {
+      await expectPromiseTypeError(() =>
+        (crypto.subtle.deriveBits as any)(algorithm, baseKey, 8)
+      );
+    }
+  });
+
+  it("should snapshot sign, verify, and raw importKey inputs at call time", async () => {
+    const hmacKey = await crypto.subtle.generateKey(
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign", "verify"]
+    );
+    const original = new Uint8Array([1, 2, 3]);
+    const signInput = original.slice();
+    const signPromise = crypto.subtle.sign("HMAC", hmacKey, signInput);
+    signInput.fill(9);
+    const signature = await signPromise;
+    expect(
+      await crypto.subtle.verify("HMAC", hmacKey, signature, original)
+    ).toBe(true);
+
+    const verifySignature = new Uint8Array(signature.slice(0));
+    const verifyData = original.slice();
+    const verifyPromise = crypto.subtle.verify(
+      "HMAC",
+      hmacKey,
+      verifySignature,
+      verifyData
+    );
+    verifySignature.fill(0);
+    verifyData.fill(9);
+    expect(await verifyPromise).toBe(true);
+
+    const rawKey = new Uint8Array(16).fill(7);
+    const importPromise = crypto.subtle.importKey(
+      "raw",
+      rawKey,
+      "AES-GCM",
+      true,
+      ["encrypt"]
+    );
+    rawKey.fill(8);
+    const imported = await importPromise;
+    expect(
+      new Uint8Array(await crypto.subtle.exportKey("raw", imported))
+    ).toEqual(new Uint8Array(16).fill(7));
   });
 });
 

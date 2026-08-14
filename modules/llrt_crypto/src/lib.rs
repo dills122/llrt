@@ -51,9 +51,9 @@ use rquickjs::{
 };
 pub use subtle::CryptoKey;
 use subtle::{
-    subtle_decrypt, subtle_derive_bits, subtle_derive_key, subtle_digest, subtle_encrypt,
-    subtle_export_key, subtle_generate_key, subtle_import_key, subtle_sign, subtle_unwrap_key,
-    subtle_verify, subtle_wrap_key, SubtleCrypto,
+    promise_method, subtle_decrypt, subtle_derive_bits, subtle_derive_key, subtle_digest,
+    subtle_encrypt, subtle_export_key, subtle_generate_key, subtle_import_key, subtle_sign,
+    subtle_unwrap_key, subtle_verify, subtle_wrap_key, SubtleCrypto,
 };
 
 use self::{
@@ -290,18 +290,31 @@ pub fn init(ctx: &Ctx<'_>) -> Result<()> {
     Class::<CryptoKey>::define(&globals)?;
 
     let subtle = Class::instance(ctx.clone(), SubtleCrypto {})?;
-    subtle.set("decrypt", Func::from(Async(subtle_decrypt)))?;
-    subtle.set("deriveKey", Func::from(Async(subtle_derive_key)))?;
-    subtle.set("deriveBits", Func::from(Async(subtle_derive_bits)))?;
-    subtle.set("digest", Func::from(Async(subtle_digest)))?;
-    subtle.set("encrypt", Func::from(Async(subtle_encrypt)))?;
-    subtle.set("exportKey", Func::from(Async(subtle_export_key)))?;
-    subtle.set("generateKey", Func::from(Async(subtle_generate_key)))?;
-    subtle.set("importKey", Func::from(Async(subtle_import_key)))?;
-    subtle.set("sign", Func::from(Async(subtle_sign)))?;
-    subtle.set("verify", Func::from(Async(subtle_verify)))?;
-    subtle.set("wrapKey", Func::from(Async(subtle_wrap_key)))?;
-    subtle.set("unwrapKey", Func::from(Async(subtle_unwrap_key)))?;
+    macro_rules! set_subtle_method {
+        ($name:literal, $implementation:expr, $length:literal) => {
+            subtle.set(
+                $name,
+                promise_method(
+                    &ctx,
+                    Function::new(ctx.clone(), Async($implementation))?,
+                    $name,
+                    $length,
+                )?,
+            )?;
+        };
+    }
+    set_subtle_method!("decrypt", subtle_decrypt, 3);
+    set_subtle_method!("deriveKey", subtle_derive_key, 5);
+    set_subtle_method!("deriveBits", subtle_derive_bits, 3);
+    set_subtle_method!("digest", subtle_digest, 2);
+    set_subtle_method!("encrypt", subtle_encrypt, 3);
+    set_subtle_method!("exportKey", subtle_export_key, 2);
+    set_subtle_method!("generateKey", subtle_generate_key, 3);
+    set_subtle_method!("importKey", subtle_import_key, 5);
+    set_subtle_method!("sign", subtle_sign, 3);
+    set_subtle_method!("verify", subtle_verify, 4);
+    set_subtle_method!("wrapKey", subtle_wrap_key, 4);
+    set_subtle_method!("unwrapKey", subtle_unwrap_key, 7);
     crypto.set("subtle", subtle)?;
 
     globals.set("crypto", crypto)?;
