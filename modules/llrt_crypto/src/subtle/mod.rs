@@ -94,18 +94,6 @@ impl<'js> FromJs<'js> for WebCryptoBufferSource<'js> {
         let bytes = ObjectBytes::from_array_buffer(object)?.ok_or_else(|| {
             Exception::throw_type(ctx, "value is not an ArrayBuffer or ArrayBufferView")
         })?;
-        let (buffer, length, offset) = bytes.get_array_buffer()?.ok_or_else(|| {
-            Exception::throw_type(ctx, "value is not an ArrayBuffer or ArrayBufferView")
-        })?;
-        if offset
-            .checked_add(length)
-            .is_none_or(|end| end > buffer.len())
-        {
-            return Err(Exception::throw_type(
-                ctx,
-                "ArrayBufferView is outside its backing buffer",
-            ));
-        }
 
         Ok(Self {
             ctx: ctx.clone(),
