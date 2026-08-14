@@ -97,6 +97,16 @@ describe("SubtleCrypto digest", () => {
       expected
     );
   });
+
+  it("should treat a detached BufferSource as empty", async () => {
+    const expected = await crypto.subtle.digest("SHA-256", new Uint8Array());
+    const data = new Uint8Array([1, 2, 3]);
+    (data.buffer as any).transfer();
+
+    await expect(crypto.subtle.digest("SHA-256", data)).resolves.toEqual(
+      expected
+    );
+  });
 });
 
 describe("SubtleCrypto Promise boundary", () => {
