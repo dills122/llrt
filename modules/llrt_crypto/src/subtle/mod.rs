@@ -48,10 +48,15 @@ mod key_algorithm;
 use key_algorithm::KeyAlgorithm;
 
 use llrt_exceptions::DOMException;
-use llrt_utils::{bytes::ObjectBytes, error::ErrorExtensions, object::ObjectExt, str_enum};
+use llrt_utils::{
+    bytes::ObjectBytes,
+    object::ObjectExt,
+    primordials::{BasePrimordials, Primordial},
+    str_enum,
+};
 use rquickjs::{
-    atom::PredefinedAtom, function::Rest, Ctx, Error, Exception, FromJs, Function, Object, Promise,
-    Result, Value,
+    atom::PredefinedAtom, ArrayBuffer, Ctx, Error, Exception, FromJs, Function, Object, Result,
+    Value,
 };
 
 use crate::provider::{CryptoProvider, SimpleDigest};
@@ -74,9 +79,34 @@ impl<'js> FromJs<'js> for WebCryptoBufferSource<'js> {
         let object = value.as_object().ok_or_else(|| {
             Exception::throw_type(ctx, "value is not an ArrayBuffer or ArrayBufferView")
         })?;
+
+        let is_array_buffer = ArrayBuffer::from_object(object.clone()).is_some();
+        let is_view = BasePrimordials::get(ctx)?
+            .function_array_buffer_is_view
+            .call::<_, bool>((object.clone(),))?;
+        if !is_array_buffer && !is_view {
+            return Err(Exception::throw_type(
+                ctx,
+                "value is not an ArrayBuffer or ArrayBufferView",
+            ));
+        }
+
         let bytes = ObjectBytes::from_array_buffer(object)?.ok_or_else(|| {
             Exception::throw_type(ctx, "value is not an ArrayBuffer or ArrayBufferView")
         })?;
+        let (buffer, length, offset) = bytes.get_array_buffer()?.ok_or_else(|| {
+            Exception::throw_type(ctx, "value is not an ArrayBuffer or ArrayBufferView")
+        })?;
+        if offset
+            .checked_add(length)
+            .is_none_or(|end| end > buffer.len())
+        {
+            return Err(Exception::throw_type(
+                ctx,
+                "ArrayBufferView is outside its backing buffer",
+            ));
+        }
+
         Ok(Self {
             ctx: ctx.clone(),
             bytes,
@@ -100,34 +130,29 @@ impl<'js> WebCryptoBufferSource<'js> {
 /// Wrap a typed async binding with the Web IDL Promise-returning operation
 /// boundary. `rquickjs::Async` converts Rust parameters before it constructs a
 /// JavaScript Promise, so conversion failures would otherwise escape
-/// synchronously. Calling the typed implementation from a raw-value function
-/// preserves its synchronous prepare/snapshot phase, while converting only a
-/// synchronous exception into a rejected intrinsic Promise.
+/// synchronously. The wrapper is a JavaScript closure so QuickJS traces its
+/// captured implementation function; capturing a JavaScript function in an
+/// `rquickjs` Rust callback would leave that reference untraced.
 pub fn promise_method<'js>(
     ctx: &Ctx<'js>,
     implementation: Function<'js>,
     name: &'static str,
     length: usize,
 ) -> Result<Function<'js>> {
-    let function = Function::new(
-        ctx.clone(),
-        move |ctx: Ctx<'js>, arguments: Rest<Value<'js>>| -> Result<Value<'js>> {
-            match implementation.call::<_, Value>((Rest(arguments.0),)) {
-                Ok(value) => Ok(value),
-                Err(error) => {
-                    let error = if error.is_num_args() || error.is_from_js() {
-                        Exception::throw_type(&ctx, &error.to_string())
-                    } else {
-                        error
-                    };
-                    let reason = error.into_value(&ctx)?;
-                    let (promise, _, reject) = Promise::new(&ctx)?;
-                    reject.call::<_, ()>((reason,))?;
-                    Ok(promise.into_value())
-                },
-            }
-        },
+    let factory: Function = ctx.eval(
+        r#"(implementation, PromiseConstructor) => {
+            const reject = PromiseConstructor.reject.bind(PromiseConstructor);
+            return function (...args) {
+                try {
+                    return implementation(...args);
+                } catch (error) {
+                    return reject(error);
+                }
+            };
+        }"#,
     )?;
+    let promise_constructor: Function = ctx.globals().get(PredefinedAtom::Promise)?;
+    let function: Function = factory.call((implementation, promise_constructor))?;
     function.set_name(name)?;
     function.set_length(length)?;
     Ok(function)
