@@ -1,33 +1,36 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
+use std::future::Future;
+
 use crate::provider::{CryptoProvider, HmacProvider};
-use llrt_utils::{bytes::ObjectBytes, result::ResultExt};
-use rquickjs::{Class, Ctx, Result};
+use llrt_utils::result::ResultExt;
+use rquickjs::{Class, Ctx, FromJs, Result, Value};
 
 use crate::CRYPTO_PROVIDER;
 
 use super::{
     algorithm_mismatch_error, crypto_key::CryptoKey, digest, key_algorithm::KeyAlgorithm,
-    rsa_hash_digest, sign_algorithm::SigningAlgorithm,
+    rsa_hash_digest, sign_algorithm::SigningAlgorithm, WebCryptoBufferSource,
 };
 
-pub async fn subtle_verify<'js>(
+pub fn subtle_verify<'js>(
     ctx: Ctx<'js>,
-    algorithm: SigningAlgorithm,
+    algorithm: Value<'js>,
     key: Class<'js, CryptoKey<'js>>,
-    signature: ObjectBytes<'js>,
-    data: ObjectBytes<'js>,
-) -> Result<bool> {
-    let key = key.borrow();
-    key.check_validity("verify").or_throw(&ctx)?;
+    signature: WebCryptoBufferSource<'js>,
+    data: WebCryptoBufferSource<'js>,
+) -> impl Future<Output = Result<bool>> + 'js {
+    let algorithm = SigningAlgorithm::from_js(&ctx, algorithm);
+    let signature = signature.snapshot();
+    let data = data.snapshot();
 
-    verify(
-        &ctx,
-        &algorithm,
-        &key,
-        signature.as_bytes(&ctx)?,
-        data.as_bytes(&ctx)?,
-    )
+    async move {
+        let algorithm = algorithm?;
+        let key = key.borrow();
+        key.check_validity("verify").or_throw(&ctx)?;
+
+        verify(&ctx, &algorithm, &key, &signature, &data)
+    }
 }
 
 fn verify(

@@ -1,27 +1,35 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
+use std::future::Future;
+
 use crate::provider::{CryptoProvider, HmacProvider};
-use llrt_utils::{bytes::ObjectBytes, result::ResultExt};
-use rquickjs::{ArrayBuffer, Class, Ctx, Result};
+use llrt_utils::result::ResultExt;
+use rquickjs::{ArrayBuffer, Class, Ctx, FromJs, Result, Value};
 
 use crate::CRYPTO_PROVIDER;
 
 use super::{
     algorithm_mismatch_error, crypto_key::CryptoKey, key_algorithm::KeyAlgorithm, rsa_hash_digest,
-    sign_algorithm::SigningAlgorithm,
+    sign_algorithm::SigningAlgorithm, WebCryptoBufferSource,
 };
 
-pub async fn subtle_sign<'js>(
+pub fn subtle_sign<'js>(
     ctx: Ctx<'js>,
-    algorithm: SigningAlgorithm,
+    algorithm: Value<'js>,
     key: Class<'js, CryptoKey<'js>>,
-    data: ObjectBytes<'js>,
-) -> Result<ArrayBuffer<'js>> {
-    let key = key.borrow();
-    key.check_validity("sign").or_throw(&ctx)?;
+    data: WebCryptoBufferSource<'js>,
+) -> impl Future<Output = Result<ArrayBuffer<'js>>> + 'js {
+    let algorithm = SigningAlgorithm::from_js(&ctx, algorithm);
+    let data = data.snapshot();
 
-    let bytes = sign(&ctx, &algorithm, &key, data.as_bytes(&ctx)?)?;
-    ArrayBuffer::new(ctx, bytes)
+    async move {
+        let algorithm = algorithm?;
+        let key = key.borrow();
+        key.check_validity("sign").or_throw(&ctx)?;
+
+        let bytes = sign(&ctx, &algorithm, &key, &data)?;
+        ArrayBuffer::new(ctx, bytes)
+    }
 }
 
 fn sign(
