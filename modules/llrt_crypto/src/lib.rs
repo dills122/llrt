@@ -395,3 +395,27 @@ impl From<CryptoModule> for ModuleInfo<CryptoModule> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use llrt_utils::primordials::{BasePrimordials, Primordial};
+    use rquickjs::{CatchResultExt, Context, Function, Runtime};
+
+    #[test]
+    fn subtle_method_wrappers_release_their_captured_functions() {
+        let runtime = Runtime::new().unwrap();
+        let context = Context::full(&runtime).unwrap();
+
+        context.with(|ctx| {
+            BasePrimordials::init(&ctx).unwrap();
+            let implementation = Function::new(ctx.clone(), || ()).unwrap();
+            let wrapper = super::promise_method(&ctx, implementation, "testSubtleMethod", 0)
+                .catch(&ctx)
+                .unwrap();
+            ctx.globals().set("testSubtleMethod", wrapper).unwrap();
+        });
+
+        drop(context);
+        drop(runtime);
+    }
+}

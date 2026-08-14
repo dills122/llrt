@@ -68,25 +68,60 @@ describe("SubtleCrypto digest", () => {
   });
 
   for (const data of [1, "not a BufferSource"]) {
-    it(`should reject invalid BufferSource input without throwing synchronously: ${JSON.stringify(data)}`, async () => {
+    it(`should reject invalid BufferSource input without throwing synchronously: ${JSON.stringify(
+      data
+    )}`, async () => {
       await expectPromiseTypeError(() =>
         (crypto.subtle.digest as any)("SHA-256", data)
       );
+    });
+  }
+
+  it("should reject objects that only resemble BufferSource values", async () => {
+    for (const data of [
+      { buffer: new ArrayBuffer(3), byteOffset: 0, byteLength: 3 },
+      { buffer: new ArrayBuffer(1), byteOffset: 2, byteLength: 2 },
+    ]) {
+      await expectPromiseTypeError(() =>
+        (crypto.subtle.digest as any)("SHA-256", data)
+      );
+    }
+  });
+
+  it("should accept DataView input", async () => {
+    const data = new Uint8Array([1, 2, 3]);
+    const expected = await crypto.subtle.digest("SHA-256", data);
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+
+    await expect(crypto.subtle.digest("SHA-256", view)).resolves.toEqual(
+      expected
+    );
+  });
+});
+
+describe("SubtleCrypto Promise boundary", () => {
+  for (const name of [
+    "decrypt",
+    "deriveKey",
+    "deriveBits",
+    "digest",
+    "encrypt",
+    "exportKey",
+    "generateKey",
+    "importKey",
+    "sign",
+    "verify",
+    "wrapKey",
+    "unwrapKey",
+  ] as const) {
+    it(`should reject missing ${name} arguments with TypeError without throwing synchronously`, async () => {
+      await expectPromiseTypeError(() => (crypto.subtle[name] as any)());
     });
   }
 });
 
 fullCrypto("SubtleCrypto WebIDL Promise boundary", () => {
   const bytes = new Uint8Array([1, 2, 3]);
-
-  for (const [name, call] of [
-    ["digest", () => (crypto.subtle.digest as any)("SHA-256")],
-    ["sign", () => (crypto.subtle.sign as any)("HMAC")],
-  ] as [string, () => Promise<unknown>][]) {
-    it(`should reject missing ${name} arguments with TypeError without throwing synchronously`, async () => {
-      await expectPromiseTypeError(call);
-    });
-  }
 
   for (const [name, call] of [
     ["encrypt", () => (crypto.subtle.encrypt as any)("AES-GCM", {}, bytes)],
@@ -285,6 +320,42 @@ fullCrypto("SubtleCrypto WebIDL Promise boundary", () => {
     expect(
       new Uint8Array(await crypto.subtle.exportKey("raw", imported))
     ).toEqual(new Uint8Array(16).fill(7));
+  });
+
+  it("should normalize importKey algorithms before snapshotting key data", async () => {
+    const rawKey = new Uint8Array(16).fill(7);
+    const algorithm = {
+      get name() {
+        rawKey.fill(8);
+        return "AES-GCM";
+      },
+    };
+
+    const imported = await crypto.subtle.importKey(
+      "raw",
+      rawKey,
+      algorithm,
+      true,
+      ["encrypt"]
+    );
+    expect(
+      new Uint8Array(await crypto.subtle.exportKey("raw", imported))
+    ).toEqual(new Uint8Array(16).fill(8));
+  });
+
+  it("should convert importKey key data before normalizing its algorithm", async () => {
+    let normalized = false;
+    const algorithm = {
+      get name() {
+        normalized = true;
+        return "AES-GCM";
+      },
+    };
+
+    await expectPromiseTypeError(() =>
+      (crypto.subtle.importKey as any)("raw", {}, algorithm, false, ["encrypt"])
+    );
+    expect(normalized).toBe(false);
   });
 });
 
