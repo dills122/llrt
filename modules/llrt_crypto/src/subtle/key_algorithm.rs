@@ -210,13 +210,13 @@ impl KeyDerivation {
         let hash = extract_sha_hash(ctx, &obj)?;
 
         let salt = obj
-            .get_required::<_, ObjectBytes>("salt", "algorithm")?
-            .into_bytes(ctx)?
+            .get_required::<_, super::WebCryptoBufferSource>("salt", "algorithm")?
+            .snapshot()
             .into_boxed_slice();
 
         let info = obj
-            .get_required::<_, ObjectBytes>("info", "algorithm")?
-            .into_bytes(ctx)?
+            .get_required::<_, super::WebCryptoBufferSource>("info", "algorithm")?
+            .snapshot()
             .into_boxed_slice();
 
         Ok(KeyDerivation::Hkdf { hash, salt, info })
@@ -226,8 +226,8 @@ impl KeyDerivation {
         let hash = extract_sha_hash(ctx, &obj)?;
 
         let salt = obj
-            .get_required::<_, ObjectBytes>("salt", "algorithm")?
-            .into_bytes(ctx)?
+            .get_required::<_, super::WebCryptoBufferSource>("salt", "algorithm")?
+            .snapshot()
             .into_boxed_slice();
 
         let iterations = obj.get_required("iterations", "algorithm")?;
@@ -808,6 +808,41 @@ fn from_pbkdf2<'js>(
 }
 
 impl KeyAlgorithm {
+    /// Normalize the import algorithm before binary key data is snapshotted.
+    ///
+    /// The returned object contains only converted values, so the asynchronous
+    /// import phase cannot observe the caller's algorithm getters a second time.
+    pub fn prepare_import_algorithm<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Result<Value<'js>> {
+        let (name, source) = to_name_and_maybe_object(ctx, value)?;
+        let name = normalize_algorithm_name(&name);
+        let algorithm = Object::new(ctx.clone())?;
+        algorithm.set(PredefinedAtom::Name, name.as_str())?;
+
+        match name.as_str() {
+            "Ed25519" | "X25519" | "AES-CBC" | "AES-CTR" | "AES-GCM" | "AES-KW" | "HKDF"
+            | "PBKDF2" => {},
+            "ECDH" | "ECDSA" => {
+                let named_curve: String = source?.get_required("namedCurve", "algorithm")?;
+                algorithm.set("namedCurve", named_curve)?;
+            },
+            "HMAC" => {
+                let source = source?;
+                let hash = extract_sha_hash(ctx, &source)?;
+                algorithm.set("hash", hash.as_str())?;
+                if let Some(length) = source.get_optional::<_, u16>("length")? {
+                    algorithm.set(PredefinedAtom::Length, length)?;
+                }
+            },
+            "RSA-OAEP" | "RSA-PSS" | "RSASSA-PKCS1-v1_5" => {
+                let hash = extract_sha_hash(ctx, &source?)?;
+                algorithm.set("hash", hash.as_str())?;
+            },
+            _ => return algorithm_not_supported_error(ctx),
+        }
+
+        Ok(algorithm.into_value())
+    }
+
     pub fn from_js<'js>(
         ctx: &Ctx<'js>,
         mode: KeyAlgorithmMode<'_, 'js>,
