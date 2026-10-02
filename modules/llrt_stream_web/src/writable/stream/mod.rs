@@ -236,10 +236,11 @@ impl<'js> WritableStream<'js> {
                 controller: ts_controller.clone(),
             },
             super::WritableCloseAlgorithm::Transform {
-                stream: ts_stream,
+                stream: ts_stream.clone(),
                 controller: ts_controller.clone(),
             },
             super::WritableAbortAlgorithm::Transform {
+                stream: ts_stream,
                 controller: ts_controller,
             },
             high_water_mark,

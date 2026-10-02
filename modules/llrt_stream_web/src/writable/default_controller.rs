@@ -284,11 +284,11 @@ impl<'js> WritableStreamDefaultController<'js> {
         }
     }
 
-    fn writable_stream_default_controller_error_if_needed(
+    fn writable_stream_default_controller_error_if_needed<W: WritableStreamWriter<'js>>(
         ctx: Ctx<'js>,
-        objects: WritableStreamObjects<'js, WritableStreamDefaultWriterOwned<'js>>,
+        objects: WritableStreamObjects<'js, W>,
         error: Value<'js>,
-    ) -> Result<WritableStreamObjects<'js, WritableStreamDefaultWriterOwned<'js>>> {
+    ) -> Result<WritableStreamObjects<'js, W>> {
         // If controller.[[stream]].[[state]] is "writable", perform ! WritableStreamDefaultControllerError(controller, error).
         if let WritableStreamState::Writable = objects.stream.state {
             Self::writable_stream_default_controller_error(ctx, objects, error)
@@ -706,6 +706,21 @@ impl<'js> WritableStreamDefaultController<'js> {
     }
 }
 
+/// Rust entry point for the `WritableStreamDefaultControllerErrorIfNeeded`
+/// abstract operation.
+pub(crate) fn writable_stream_default_controller_error_if_needed<'js>(
+    ctx: Ctx<'js>,
+    controller: WritableStreamDefaultControllerClass<'js>,
+    error: Value<'js>,
+) -> Result<()> {
+    let objects = WritableStreamObjects::from_controller(OwnedBorrowMut::from_class(controller))
+        .refresh_writer();
+    WritableStreamDefaultController::writable_stream_default_controller_error_if_needed(
+        ctx, objects, error,
+    )?;
+    Ok(())
+}
+
 #[derive(Clone)]
 pub(crate) enum WritableStartAlgorithm<'js> {
     ReturnUndefined,
@@ -818,6 +833,7 @@ pub(crate) enum WritableAbortAlgorithm<'js> {
         underlying_sink: Null<Undefined<Object<'js>>>,
     },
     Transform {
+        stream: TransformStreamClass<'js>,
         controller: TransformStreamDefaultControllerClass<'js>,
     },
 }
@@ -838,8 +854,13 @@ impl<'js> WritableAbortAlgorithm<'js> {
                 promise_primordials,
                 f.call::<_, Value>((This(underlying_sink.clone()), reason)),
             ),
-            WritableAbortAlgorithm::Transform { controller } => {
-                crate::transform::stream::sink_abort_algorithm(ctx.clone(), controller, reason)
+            WritableAbortAlgorithm::Transform { stream, controller } => {
+                crate::transform::stream::sink_abort_algorithm(
+                    ctx.clone(),
+                    stream,
+                    controller,
+                    reason,
+                )
             },
         }
     }
