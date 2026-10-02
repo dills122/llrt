@@ -2,7 +2,7 @@ use std::future::Future;
 
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
-use llrt_utils::{bytes::ObjectBytes, object::ObjectExt, result::ResultExt};
+use llrt_utils::{object::ObjectExt, result::ResultExt};
 use rquickjs::{ArrayBuffer, Ctx, Result, Value};
 
 use crate::{
@@ -11,12 +11,12 @@ use crate::{
     CRYPTO_PROVIDER,
 };
 
-use super::algorithm_not_supported_error;
+use super::{algorithm_not_supported_error, WebCryptoBufferSource};
 
 pub fn subtle_digest<'js>(
     ctx: Ctx<'js>,
     algorithm: Value<'js>,
-    data: ObjectBytes<'js>,
+    data: WebCryptoBufferSource<'js>,
 ) -> impl Future<Output = Result<ArrayBuffer<'js>>> + 'js {
     // Snapshot inputs synchronously so mutating/detaching the buffer after the call can't affect the result (WPT digest.https.any.js).
     let prepared = prepare_digest(&ctx, algorithm, data);
@@ -31,7 +31,7 @@ pub fn subtle_digest<'js>(
 fn prepare_digest<'js>(
     ctx: &Ctx<'js>,
     algorithm: Value<'js>,
-    data: ObjectBytes<'js>,
+    data: WebCryptoBufferSource<'js>,
 ) -> Result<(HashAlgorithm, Vec<u8>)> {
     let algorithm = if let Some(s) = algorithm.as_string() {
         s.to_string().or_throw(ctx)?
@@ -47,7 +47,7 @@ fn prepare_digest<'js>(
         Ok(h) => h,
         Err(_) => return algorithm_not_supported_error(ctx),
     };
-    let input = data.as_bytes_opt().map(<[u8]>::to_vec).unwrap_or_default();
+    let input = data.snapshot();
     Ok((hash_algorithm, input))
 }
 

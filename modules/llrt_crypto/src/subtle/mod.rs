@@ -48,8 +48,16 @@ mod key_algorithm;
 use key_algorithm::KeyAlgorithm;
 
 use llrt_exceptions::DOMException;
-use llrt_utils::{object::ObjectExt, str_enum};
-use rquickjs::{atom::PredefinedAtom, Ctx, Error, Exception, Object, Result, Value};
+use llrt_utils::{
+    bytes::ObjectBytes,
+    object::ObjectExt,
+    primordials::{BasePrimordials, Primordial},
+    str_enum,
+};
+use rquickjs::{
+    atom::PredefinedAtom, ArrayBuffer, Ctx, Error, Exception, FromJs, Function, Object, Result,
+    Value,
+};
 
 use crate::provider::{CryptoProvider, SimpleDigest};
 
@@ -58,6 +66,85 @@ use crate::hash::HashAlgorithm;
 #[rquickjs::class]
 #[derive(rquickjs::JsLifetime, rquickjs::class::Trace)]
 pub struct SubtleCrypto {}
+
+/// A Web IDL `BufferSource`, scoped to WebCrypto so LLRT's deliberately
+/// permissive general-purpose byte conversion can remain backward compatible.
+pub struct WebCryptoBufferSource<'js> {
+    ctx: Ctx<'js>,
+    bytes: ObjectBytes<'js>,
+}
+
+impl<'js> FromJs<'js> for WebCryptoBufferSource<'js> {
+    fn from_js(ctx: &Ctx<'js>, value: Value<'js>) -> Result<Self> {
+        let object = value.as_object().ok_or_else(|| {
+            Exception::throw_type(ctx, "value is not an ArrayBuffer or ArrayBufferView")
+        })?;
+
+        let is_array_buffer = ArrayBuffer::from_object(object.clone()).is_some();
+        let is_view = BasePrimordials::get(ctx)?
+            .function_array_buffer_is_view
+            .call::<_, bool>((object.clone(),))?;
+        if !is_array_buffer && !is_view {
+            return Err(Exception::throw_type(
+                ctx,
+                "value is not an ArrayBuffer or ArrayBufferView",
+            ));
+        }
+
+        let bytes = ObjectBytes::from_array_buffer(object)?.ok_or_else(|| {
+            Exception::throw_type(ctx, "value is not an ArrayBuffer or ArrayBufferView")
+        })?;
+
+        Ok(Self {
+            ctx: ctx.clone(),
+            bytes,
+        })
+    }
+}
+
+impl<'js> WebCryptoBufferSource<'js> {
+    pub fn snapshot(&self) -> Vec<u8> {
+        self.bytes
+            .as_bytes_opt()
+            .map(<[u8]>::to_vec)
+            .unwrap_or_default()
+    }
+
+    pub fn ctx(&self) -> Ctx<'js> {
+        self.ctx.clone()
+    }
+}
+
+/// Wrap a typed async binding with the Web IDL Promise-returning operation
+/// boundary. `rquickjs::Async` converts Rust parameters before it constructs a
+/// JavaScript Promise, so conversion failures would otherwise escape
+/// synchronously. The wrapper is a JavaScript closure so QuickJS traces its
+/// captured implementation function; capturing a JavaScript function in an
+/// `rquickjs` Rust callback would leave that reference untraced.
+pub fn promise_method<'js>(
+    ctx: &Ctx<'js>,
+    implementation: Function<'js>,
+    name: &'static str,
+    length: usize,
+) -> Result<Function<'js>> {
+    let factory: Function = ctx.eval(
+        r#"(implementation, PromiseConstructor) => {
+            const reject = PromiseConstructor.reject.bind(PromiseConstructor);
+            return function (...args) {
+                try {
+                    return implementation(...args);
+                } catch (error) {
+                    return reject(error);
+                }
+            };
+        }"#,
+    )?;
+    let promise_constructor: Function = ctx.globals().get(PredefinedAtom::Promise)?;
+    let function: Function = factory.call((implementation, promise_constructor))?;
+    function.set_name(name)?;
+    function.set_length(length)?;
+    Ok(function)
+}
 
 #[rquickjs::methods]
 impl SubtleCrypto {

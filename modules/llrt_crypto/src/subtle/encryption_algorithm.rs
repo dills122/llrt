@@ -1,10 +1,13 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 use llrt_exceptions::DOMException;
-use llrt_utils::{bytes::ObjectBytes, object::ObjectExt};
+use llrt_utils::object::ObjectExt;
 use rquickjs::{Ctx, Exception, FromJs, Result, Value};
 
-use super::{algorithm_not_supported_error, normalize_algorithm_name, to_name_and_maybe_object};
+use super::{
+    algorithm_not_supported_error, normalize_algorithm_name, to_name_and_maybe_object,
+    WebCryptoBufferSource,
+};
 
 #[derive(Debug)]
 pub enum EncryptionAlgorithm {
@@ -35,8 +38,8 @@ impl<'js> FromJs<'js> for EncryptionAlgorithm {
             "AES-CBC" => {
                 let obj = obj?;
                 let iv = obj
-                    .get_required::<_, ObjectBytes>("iv", "algorithm")?
-                    .into_bytes(ctx)?
+                    .get_required::<_, WebCryptoBufferSource>("iv", "algorithm")?
+                    .snapshot()
                     .into_boxed_slice();
 
                 if iv.len() != 16 {
@@ -51,8 +54,8 @@ impl<'js> FromJs<'js> for EncryptionAlgorithm {
             "AES-CTR" => {
                 let obj = obj?;
                 let counter = obj
-                    .get_required::<_, ObjectBytes>("counter", "algorithm")?
-                    .into_bytes(ctx)?
+                    .get_required::<_, WebCryptoBufferSource>("counter", "algorithm")?
+                    .snapshot()
                     .into_boxed_slice();
 
                 let length = obj.get_required::<_, u32>("length", "algorithm")?;
@@ -69,8 +72,8 @@ impl<'js> FromJs<'js> for EncryptionAlgorithm {
             "AES-GCM" => {
                 let obj = obj?;
                 let iv = obj
-                    .get_required::<_, ObjectBytes>("iv", "algorithm")?
-                    .into_bytes(ctx)?
+                    .get_required::<_, WebCryptoBufferSource>("iv", "algorithm")?
+                    .snapshot()
                     .into_boxed_slice();
 
                 //FIXME only 12? 96 maybe recommended?
@@ -82,9 +85,8 @@ impl<'js> FromJs<'js> for EncryptionAlgorithm {
                 }
 
                 let additional_data = obj
-                    .get_optional::<_, ObjectBytes>("additionalData")?
-                    .map(|v| v.into_bytes(ctx))
-                    .transpose()?
+                    .get_optional::<_, WebCryptoBufferSource>("additionalData")?
+                    .map(|v| v.snapshot())
                     .map(|vec| vec.into_boxed_slice());
 
                 let tag_length = obj.get_optional::<_, u8>("tagLength")?.unwrap_or(128);
@@ -102,9 +104,8 @@ impl<'js> FromJs<'js> for EncryptionAlgorithm {
             },
             "RSA-OAEP" => {
                 let label = if let Ok(obj) = obj {
-                    obj.get_optional::<_, ObjectBytes>("label")?
-                        .map(|bytes| bytes.into_bytes(ctx))
-                        .transpose()?
+                    obj.get_optional::<_, WebCryptoBufferSource>("label")?
+                        .map(|bytes| bytes.snapshot())
                         .map(|vec| vec.into_boxed_slice())
                 } else {
                     None
