@@ -25,7 +25,7 @@ impl PackageLoader {
         module.push_str("const value = require(\"");
 
         module.push_str(name);
-        module.push_str("\");export default value.default||value;");
+        module.push_str("\");export default value?.default||value;");
         if let Some(obj) = export_object.as_object() {
             let keys: Result<Vec<String>> = obj.keys().collect();
             let keys = keys?;
@@ -166,7 +166,7 @@ mod tests {
     #[test]
     fn cjs_module_with_only_default_export_has_valid_syntax() {
         let mut source =
-            String::from("const value = require(\"pkg\");export default value.default||value;");
+            String::from("const value = require(\"pkg\");export default value?.default||value;");
         append_named_exports(&mut source, &["default".to_string()]);
 
         let runtime = rquickjs::Runtime::new().unwrap();

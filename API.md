@@ -322,6 +322,10 @@ When importing CommonJS, enumerable string keys other than `default` are exposed
 as named exports. Names that are not JavaScript binding identifiers can be imported
 with an alias, for example `import { "a-b" as name } from "./module.cjs"`.
 
+The default import preserves `null` and `undefined` CommonJS exports. For an
+object with a `default` property, LLRT uses that property when it is truthy;
+otherwise the default import is the exported object.
+
 [builtinModules](https://nodejs.org/api/module.html#modulebuiltinmodules)
 
 [createRequire](https://nodejs.org/api/module.html#modulecreaterequirefilename)

@@ -106,6 +106,32 @@ describe("import", () => {
     expect(mod.hyphenated).toBe(3);
   });
 
+  for (const [name, expected] of [
+    ["null", null],
+    ["undefined", undefined],
+  ] as const) {
+    it(`should import a CJS ${name} export`, async () => {
+      const filename = `${CWD}/fixtures/cjs-nullish/${name}.cjs`;
+      const mod = await import(filename);
+
+      expect(Object.keys(mod)).toEqual(["default"]);
+      expect(mod.default).toBe(expected);
+    });
+  }
+
+  for (const [name, expected] of [
+    ["zero", 0],
+    ["false", false],
+    ["empty", ""],
+  ] as const) {
+    it(`should preserve the CJS wrapper for a ${name} default property`, async () => {
+      const filename = `${CWD}/fixtures/cjs-nullish/${name}.cjs`;
+      const mod = await import(filename);
+
+      expect(mod.default).toEqual({ default: expected });
+    });
+  }
+
   it("regression testing for issue #1492", async () => {
     await import(`${CWD}/fixtures/test1492/index.js`);
   });
