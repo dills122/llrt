@@ -208,9 +208,9 @@ impl<'js> ReadableStreamDefaultController<'js> {
         // Let startPromise be a promise resolved with startResult.
         let start_promise = promise_resolved_with(&ctx, &promise_primordials, Ok(start_result))?;
 
-        let _ = upon_promise::<Value<'js>, _>(ctx.clone(), start_promise, {
+        let _ = upon_promise(ctx.clone(), start_promise, {
             let objects_class = objects_class.clone();
-            move |ctx, result| {
+            Box::new(move |ctx, result| {
                 let mut objects =
                     ReadableStreamObjects::from_class_no_reader(objects_class).refresh_reader();
 
@@ -220,7 +220,10 @@ impl<'js> ReadableStreamDefaultController<'js> {
                         // Set controller.[[started]] to true.
                         objects.controller.started = true;
                         // Perform ! ReadableByteStreamControllerCallPullIfNeeded(controller).
-                        Self::readable_stream_default_controller_call_pull_if_needed(ctx, objects)?;
+                        Self::readable_stream_default_controller_call_pull_if_needed(
+                            ctx.clone(),
+                            objects,
+                        )?;
                     },
                     // Upon rejection of startPromise with reason r,
                     Err(r) => {
@@ -228,8 +231,8 @@ impl<'js> ReadableStreamDefaultController<'js> {
                         Self::readable_stream_default_controller_error(objects, r)?;
                     },
                 }
-                Ok(())
-            }
+                Ok(Value::new_undefined(ctx))
+            })
         })?;
 
         Ok(objects_class.controller)
@@ -268,9 +271,9 @@ impl<'js> ReadableStreamDefaultController<'js> {
         // Let pullPromise be the result of performing controller.[[pullAlgorithm]].
         let (pull_promise, objects_class) = Self::pull_algorithm(ctx.clone(), objects)?;
 
-        upon_promise::<Value<'js>, _>(ctx.clone(), pull_promise, {
+        upon_promise(ctx.clone(), pull_promise, {
             let objects_class = objects_class.clone();
-            move |ctx, result| {
+            Box::new(move |ctx, result| {
                 let mut objects =
                     ReadableStreamObjects::from_class_no_reader(objects_class).refresh_reader();
                 match result {
@@ -284,19 +287,20 @@ impl<'js> ReadableStreamDefaultController<'js> {
                             objects.controller.pull_again = false;
                             // Perform ! ReadableStreamDefaultControllerCallPullIfNeeded(controller).
                             Self::readable_stream_default_controller_call_pull_if_needed(
-                                ctx, objects,
+                                ctx.clone(),
+                                objects,
                             )?;
                         };
-                        Ok(())
+                        Ok(Value::new_undefined(ctx))
                     },
                     // Upon rejection of pullPromise with reason e,
                     Err(e) => {
                         // Perform ! ReadableStreamDefaultControllerError(controller, e).
                         Self::readable_stream_default_controller_error(objects, e)?;
-                        Ok(())
+                        Ok(Value::new_undefined(ctx))
                     },
                 }
-            }
+            })
         })?;
 
         Ok(ReadableStreamObjects::from_class(objects_class))
@@ -840,11 +844,28 @@ impl<'js> ReadableStreamController<'js> for ReadableStreamDefaultControllerOwned
     fn release_steps(&mut self) {}
 }
 
-/// Public API for enqueuing data into a default controller from Rust code
+/// Internal enqueue operation for data produced by Rust code.
 pub fn readable_stream_default_controller_enqueue_value<'js>(
     ctx: Ctx<'js>,
     controller: ReadableStreamDefaultControllerClass<'js>,
     chunk: Value<'js>,
+) -> Result<()> {
+    readable_stream_default_controller_enqueue_value_impl(ctx, controller, chunk, false)
+}
+
+pub(crate) fn readable_stream_default_controller_enqueue_value_strict<'js>(
+    ctx: Ctx<'js>,
+    controller: ReadableStreamDefaultControllerClass<'js>,
+    chunk: Value<'js>,
+) -> Result<()> {
+    readable_stream_default_controller_enqueue_value_impl(ctx, controller, chunk, true)
+}
+
+fn readable_stream_default_controller_enqueue_value_impl<'js>(
+    ctx: Ctx<'js>,
+    controller: ReadableStreamDefaultControllerClass<'js>,
+    chunk: Value<'js>,
+    throw_if_unavailable: bool,
 ) -> Result<()> {
     let objects =
         ReadableStreamObjects::from_default_controller(OwnedBorrowMut::from_class(controller));
@@ -853,7 +874,13 @@ pub fn readable_stream_default_controller_enqueue_value<'js>(
         .controller
         .readable_stream_default_controller_can_close_or_enqueue(&objects.stream)
     {
-        return Ok(()); // Silently ignore if can't enqueue
+        if throw_if_unavailable {
+            return Err(Exception::throw_type(
+                &ctx,
+                "The stream is not in a state that permits enqueue",
+            ));
+        }
+        return Ok(());
     }
 
     objects.with_reader(

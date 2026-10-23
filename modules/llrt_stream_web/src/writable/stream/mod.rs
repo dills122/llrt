@@ -236,10 +236,11 @@ impl<'js> WritableStream<'js> {
                 controller: ts_controller.clone(),
             },
             super::WritableCloseAlgorithm::Transform {
-                stream: ts_stream,
+                stream: ts_stream.clone(),
                 controller: ts_controller.clone(),
             },
             super::WritableAbortAlgorithm::Transform {
+                stream: ts_stream,
                 controller: ts_controller,
             },
             high_water_mark,
@@ -484,9 +485,9 @@ impl<'js> WritableStream<'js> {
         let objects_class = objects.into_inner();
 
         // Upon fulfillment of promise,
-        let _ = upon_promise::<Value<'js>, _>(ctx.clone(), promise, {
+        let _ = upon_promise(ctx.clone(), promise, {
             let objects_class = objects_class.clone();
-            move |_, result| {
+            Box::new(move |ctx, result| {
                 let objects =
                     WritableStreamObjects::from_class_no_writer(objects_class).refresh_writer();
                 match result {
@@ -498,7 +499,7 @@ impl<'js> WritableStream<'js> {
                         WritableStream::writable_stream_reject_close_and_closed_promise_if_needed(
                             objects,
                         )?;
-                        Ok(())
+                        Ok(Value::new_undefined(ctx))
                     },
                     // Upon rejection of promise with reason reason,
                     Err(reason) => {
@@ -508,10 +509,10 @@ impl<'js> WritableStream<'js> {
                         WritableStream::writable_stream_reject_close_and_closed_promise_if_needed(
                             objects,
                         )?;
-                        Ok(())
+                        Ok(Value::new_undefined(ctx))
                     },
                 }
-            }
+            })
         })?;
 
         Ok(WritableStreamObjects::from_class(objects_class))
@@ -717,6 +718,10 @@ impl<'js> WritableStream<'js> {
         mut objects: WritableStreamObjects<'js, W>,
         backpressure: bool,
     ) -> Result<WritableStreamObjects<'js, W>> {
+        if !matches!(objects.stream.state, WritableStreamState::Writable) {
+            return Ok(objects);
+        }
+
         // If writer is not undefined and backpressure is not stream.[[backpressure]],
         objects = objects.with_writer(
             |mut objects| {
@@ -752,6 +757,32 @@ impl<'js> WritableStream<'js> {
             | WritableStreamState::Errored(ref stored_error) => Some(stored_error.clone()),
             _ => None,
         }
+    }
+
+    pub(crate) fn error_stream(
+        ctx: Ctx<'js>,
+        stream_class: WritableStreamClass<'js>,
+        reason: Value<'js>,
+    ) -> Result<()> {
+        if !matches!(stream_class.borrow().state, WritableStreamState::Writable) {
+            return Ok(());
+        }
+        let objects = WritableStreamObjects::from_stream(OwnedBorrowMut::from_class(stream_class))
+            .refresh_writer();
+        Self::writable_stream_start_erroring(ctx, objects, reason)?;
+        Ok(())
+    }
+
+    pub(crate) fn finish_in_flight_close_with_error(
+        ctx: Ctx<'js>,
+        stream_class: WritableStreamClass<'js>,
+        reason: Value<'js>,
+    ) -> Result<()> {
+        let objects = WritableStreamObjects::from_stream(OwnedBorrowMut::from_class(stream_class));
+        if objects.stream.in_flight_close_request.is_none() {
+            return Ok(());
+        }
+        Self::writable_stream_finish_in_flight_close_with_error(ctx, objects, reason)
     }
 }
 

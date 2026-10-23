@@ -80,10 +80,15 @@ jobs:
           corepack enable
           yarn
       - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           toolchain: ${{ inputs.toolchain }}
           cache-bin: false
+      - name: Install cargo-zigbuild
+        if: inputs.platform == 'linux'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
       - name: Map crypto to features
         id: features
         if: inputs.crypto != ''

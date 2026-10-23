@@ -1,6 +1,5 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
-#![cfg_attr(rust_nightly, feature(iter_array_chunks))]
 use std::borrow::Cow;
 
 use hex_simd::AsciiCase;
@@ -57,10 +56,7 @@ const ENCODING_MAP: phf::Map<&'static str, Encoder> = phf::phf_map! {
 
 impl Encoder {
     pub fn from_optional_str(encoding: Option<&str>) -> Result<Self, String> {
-        match encoding {
-            Some(label) if !label.is_empty() => Self::from_str(label),
-            _ => Ok(Self::Utf8),
-        }
+        encoding.map_or(Ok(Self::Utf8), Self::from_str)
     }
 
     #[allow(clippy::should_implement_trait)]
@@ -75,7 +71,8 @@ impl Encoder {
         match self {
             Self::Hex => Ok(bytes_to_hex_string(bytes)),
             Self::Base64 => Ok(bytes_to_b64_string(bytes)),
-            Self::Utf8 | Self::Windows1252 => bytes_to_utf8_string(bytes, lossy),
+            Self::Utf8 => bytes_to_utf8_string(bytes, lossy),
+            Self::Windows1252 => Ok(bytes_to_windows1252_string(bytes)),
             Self::Utf16le => bytes_to_utf16_string(bytes, Endian::Little, lossy),
             Self::Utf16be => bytes_to_utf16_string(bytes, Endian::Big, lossy),
         }
@@ -196,6 +193,44 @@ pub fn bytes_to_utf8_string(bytes: &[u8], lossy: bool) -> Result<String, String>
     }
 }
 
+pub fn bytes_to_windows1252_string(bytes: &[u8]) -> String {
+    bytes.iter().map(|&byte| index_windows_1252(byte)).collect()
+}
+
+// https://encoding.spec.whatwg.org/index-windows-1252.txt
+fn index_windows_1252(byte: u8) -> char {
+    match byte {
+        0x80 => '\u{20AC}',
+        0x82 => '\u{201A}',
+        0x83 => '\u{0192}',
+        0x84 => '\u{201E}',
+        0x85 => '\u{2026}',
+        0x86 => '\u{2020}',
+        0x87 => '\u{2021}',
+        0x88 => '\u{02C6}',
+        0x89 => '\u{2030}',
+        0x8A => '\u{0160}',
+        0x8B => '\u{2039}',
+        0x8C => '\u{0152}',
+        0x8E => '\u{017D}',
+        0x91 => '\u{2018}',
+        0x92 => '\u{2019}',
+        0x93 => '\u{201C}',
+        0x94 => '\u{201D}',
+        0x95 => '\u{2022}',
+        0x96 => '\u{2013}',
+        0x97 => '\u{2014}',
+        0x98 => '\u{02DC}',
+        0x99 => '\u{2122}',
+        0x9A => '\u{0161}',
+        0x9B => '\u{203A}',
+        0x9C => '\u{0153}',
+        0x9E => '\u{017E}',
+        0x9F => '\u{0178}',
+        _ => char::from(byte),
+    }
+}
+
 #[derive(Clone, Copy)]
 pub enum Endian {
     Little,
@@ -207,31 +242,20 @@ pub fn bytes_to_utf16_string(bytes: &[u8], endian: Endian, lossy: bool) -> Resul
         return Err("Input byte slice length must be even".to_string());
     }
 
-    #[cfg(rust_nightly)]
     let data16: Vec<u16> = match endian {
         Endian::Little => bytes
+            .as_chunks::<2>()
+            .0
             .iter()
             .copied()
-            .array_chunks::<2>()
-            .map(|chunk| u16::from_le_bytes(chunk))
+            .map(u16::from_le_bytes)
             .collect(),
         Endian::Big => bytes
+            .as_chunks::<2>()
+            .0
             .iter()
             .copied()
-            .array_chunks::<2>()
-            .map(|chunk| u16::from_be_bytes(chunk))
-            .collect(),
-    };
-
-    #[cfg(not(rust_nightly))]
-    let data16: Vec<u16> = match endian {
-        Endian::Little => bytes
-            .chunks_exact(2)
-            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
-            .collect(),
-        Endian::Big => bytes
-            .chunks_exact(2)
-            .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
+            .map(u16::from_be_bytes)
             .collect(),
     };
 
@@ -243,7 +267,10 @@ pub fn bytes_to_utf16_string(bytes: &[u8], endian: Endian, lossy: bool) -> Resul
 
     // Odd trailing byte in lossy mode produces a replacement character
     if lossy && !bytes.len().is_multiple_of(2) {
-        result.push('\u{FFFD}');
+        let last = data16.last().copied();
+        if !matches!(last, Some(0xD800..=0xDBFF)) {
+            result.push('\u{FFFD}');
+        }
     }
 
     Ok(result)
@@ -261,5 +288,13 @@ mod tests {
         assert!(bytes_from_b64_strict(b"-_8=").is_err());
         assert!(bytes_from_b64_strict(b"SGVs bG8=").is_err());
         assert!(bytes_from_b64_strict(b"SGVsbG8").is_err());
+    }
+
+    #[test]
+    fn windows1252_decodes_special_bytes() {
+        assert_eq!(bytes_to_windows1252_string(&[0x80]), "€");
+        assert_eq!(bytes_to_windows1252_string(&[0x82]), "‚");
+        assert_eq!(bytes_to_windows1252_string(&[0x93]), "“");
+        assert_eq!(bytes_to_windows1252_string(&[0xFF]), "ÿ");
     }
 }

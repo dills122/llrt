@@ -1,7 +1,7 @@
 [package]
 name = "llrt_test"
 description = "LLRT test helpers"
-version = "0.8.1-beta"
+version = "0.9.0-beta"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/awslabs/llrt"
@@ -11,7 +11,7 @@ name = "llrt_test"
 path = "src/lib.rs"
 
 [dependencies]
-rquickjs = { version = "0.12", features = [
+rquickjs = { version = "0.14", features = [
   "futures",
   "loader",
   "parallel",

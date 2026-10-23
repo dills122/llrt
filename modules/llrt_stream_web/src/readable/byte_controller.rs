@@ -220,9 +220,9 @@ impl<'js> ReadableByteStreamController<'js> {
         // Let startPromise be a promise resolved with startResult.
         let start_promise = promise_resolved_with(&ctx, &promise_primordials, Ok(start_result))?;
 
-        let _ = upon_promise::<Value<'js>, _>(ctx.clone(), start_promise, {
+        let _ = upon_promise(ctx.clone(), start_promise, {
             let objects_class = objects_class.clone();
-            move |ctx, result| {
+            Box::new(move |ctx, result| {
                 let mut objects =
                     ReadableStreamObjects::from_class_no_reader(objects_class).refresh_reader();
                 match result {
@@ -231,17 +231,20 @@ impl<'js> ReadableByteStreamController<'js> {
                         // Set controller.[[started]] to true.
                         objects.controller.started = true;
                         // Perform ! ReadableByteStreamControllerCallPullIfNeeded(controller).
-                        Self::readable_byte_stream_controller_call_pull_if_needed(ctx, objects)?;
-                        Ok(())
+                        Self::readable_byte_stream_controller_call_pull_if_needed(
+                            ctx.clone(),
+                            objects,
+                        )?;
+                        Ok(Value::new_undefined(ctx))
                     },
                     // Upon rejection of startPromise with reason r,
                     Err(r) => {
                         // Perform ! ReadableByteStreamControllerError(controller, r).
                         Self::readable_byte_stream_controller_error(objects, r)?;
-                        Ok(())
+                        Ok(Value::new_undefined(ctx))
                     },
                 }
-            }
+            })
         })?;
 
         Ok(objects_class.controller)
@@ -275,9 +278,9 @@ impl<'js> ReadableByteStreamController<'js> {
         // Let pullPromise be the result of performing controller.[[pullAlgorithm]].
         let (pull_promise, objects_class) = Self::pull_algorithm(ctx.clone(), objects)?;
 
-        upon_promise::<Value<'js>, ()>(ctx, pull_promise, {
+        upon_promise(ctx, pull_promise, {
             let objects_class = objects_class.clone();
-            move |ctx, result| {
+            Box::new(move |ctx, result| {
                 let mut objects =
                     ReadableStreamObjects::from_class_no_reader(objects_class).refresh_reader();
                 match result {
@@ -291,19 +294,20 @@ impl<'js> ReadableByteStreamController<'js> {
                             objects.controller.pull_again = false;
                             // Perform ! ReadableByteStreamControllerCallPullIfNeeded(controller).
                             Self::readable_byte_stream_controller_call_pull_if_needed(
-                                ctx, objects,
+                                ctx.clone(),
+                                objects,
                             )?;
                         };
-                        Ok(())
+                        Ok(Value::new_undefined(ctx))
                     },
                     // Upon rejection of pullPromise with reason e,
                     Err(e) => {
                         // Perform ! ReadableByteStreamControllerError(controller, e).
                         Self::readable_byte_stream_controller_error(objects, e)?;
-                        Ok(())
+                        Ok(Value::new_undefined(ctx))
                     },
                 }
-            }
+            })
         })?;
 
         Ok(ReadableStreamObjects::from_class(objects_class))
@@ -868,7 +872,7 @@ impl<'js> ReadableByteStreamController<'js> {
         // Let cloneResult be CloneArrayBuffer(buffer, byteOffset, byteLength, %ArrayBuffer%).
         let clone_result = match ArrayBuffer::new_copy(
             ctx.clone(),
-            &buffer.as_bytes().expect(
+            &unsafe { buffer.as_bytes() }.expect(
                 "ReadableByteStreamControllerEnqueueClonedChunkToQueue called on detached buffer",
             )[byte_offset..byte_offset + byte_length],
         ) {
@@ -1951,7 +1955,7 @@ impl<'js> ReadableStreamBYOBRequest<'js> {
         drop(byob_request);
 
         // If ! IsDetachedBuffer(this.[[view]].[[ArrayBuffer]]) is true, throw a TypeError exception.
-        if buffer.as_bytes().is_none() {
+        if buffer.as_raw().is_none() {
             return Err(Exception::throw_type(
                 &ctx,
                 "The BYOB request's buffer has been detached and so cannot be used as a response",
@@ -1998,7 +2002,7 @@ impl<'js> ReadableStreamBYOBRequest<'js> {
         let (buffer, _, _) = view.get_array_buffer()?;
 
         // If ! IsDetachedBuffer(view.[[ViewedArrayBuffer]]) is true, throw a TypeError exception.
-        if buffer.as_bytes().is_none() {
+        if buffer.as_raw().is_none() {
             return Err(Exception::throw_type(
                 &ctx,
                 "The given view's buffer has been detached and so cannot be used as a response",
@@ -2080,16 +2084,16 @@ fn copy_data_block_bytes(
     from_index: usize,
     count: usize,
 ) -> Result<()> {
-    let to_raw = to_block
+    let mut to_raw = to_block
         .as_raw()
         .ok_or(ERROR_MSG_ARRAY_BUFFER_DETACHED)
         .or_throw(ctx)?;
-    let to_slice = unsafe { std::slice::from_raw_parts_mut(to_raw.ptr.as_ptr(), to_raw.len) };
+    let to_slice = unsafe { to_raw.as_mut() };
     let from_raw = from_block
         .as_raw()
         .ok_or(ERROR_MSG_ARRAY_BUFFER_DETACHED)
         .or_throw(ctx)?;
-    let from_slice = unsafe { std::slice::from_raw_parts(from_raw.ptr.as_ptr(), from_raw.len) };
+    let from_slice = unsafe { from_raw.as_ref() };
 
     to_slice[to_index..to_index + count]
         .copy_from_slice(&from_slice[from_index..from_index + count]);

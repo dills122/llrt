@@ -4,12 +4,15 @@ use std::ops::RangeInclusive;
 
 use llrt_stream_web::{
     readable_byte_stream_controller_close_stream,
-    readable_byte_stream_controller_enqueue_bytes_borrowed, utils::promise::PromisePrimordials,
+    readable_byte_stream_controller_enqueue_bytes_borrowed,
+    readable_stream_default_controller_close_stream,
+    readable_stream_default_controller_enqueue_value, utils::promise::PromisePrimordials,
     CancelAlgorithm, PullAlgorithm, ReadableStream, ReadableStreamControllerClass,
 };
 use llrt_utils::{
     array_buffer::shared_array_buffer_view,
     bytes::{get_lossy_string, ObjectBytes},
+    object::not_a_object_error,
     primordials::Primordial,
     result::ResultExt,
     string::get_coerced_defined_string,
@@ -112,6 +115,36 @@ impl<'js> Blob<'js> {
 
     pub async fn text(&self) -> String {
         String::from_utf8_lossy(self.as_bytes()).to_string()
+    }
+
+    #[qjs(rename = "textStream")]
+    pub fn text_stream(&self, ctx: Ctx<'js>) -> Result<Value<'js>> {
+        let text = String::from_utf8_lossy(self.as_bytes()).to_string();
+        let pull = PullAlgorithm::from_fn_once(
+            move |ctx: Ctx<'js>, controller: ReadableStreamControllerClass<'js>| {
+                let ctrl = match controller {
+                    ReadableStreamControllerClass::ReadableStreamDefaultController(c) => c,
+                    _ => return Err(Exception::throw_type(&ctx, "Expected default controller")),
+                };
+                if !text.is_empty() {
+                    readable_stream_default_controller_enqueue_value(
+                        ctx.clone(),
+                        ctrl.clone(),
+                        text.clone().into_js(&ctx)?,
+                    )?;
+                }
+                readable_stream_default_controller_close_stream(ctx.clone(), ctrl)?;
+                Ok(PromisePrimordials::get(&ctx)?
+                    .promise_resolved_with_undefined
+                    .clone())
+            },
+        );
+        let stream = ReadableStream::from_pull_algorithm(
+            ctx,
+            pull,
+            CancelAlgorithm::ReturnPromiseUndefined,
+        )?;
+        Ok(stream.into_value())
     }
 
     #[qjs(rename = "arrayBuffer")]
@@ -225,15 +258,15 @@ impl<'js> Blob<'js> {
         parts: Opt<Value<'js>>,
         options: Opt<Value<'js>>,
     ) -> Result<Self> {
+        if let Some(options) = options.0.as_ref() {
+            if !options.is_null() && !options.is_undefined() && options.as_object().is_none() {
+                return Err(not_a_object_error(&ctx, "options"));
+            }
+        }
+
         let mut endings = EndingType::Transparent;
-        let mut mime_type = String::new();
-
-        if let Some(options) = options.0 {
+        if let Some(options) = options.0.as_ref() {
             if let Some(opts) = options.as_object() {
-                if let Some(x) = opts.get::<_, Option<Coerced<String>>>("type")? {
-                    mime_type = normalize_type(x.to_string());
-                }
-
                 if opts.contains_key("endings")? {
                     if let Some(parsed) = parse_endings(&ctx, opts.get("endings")?)? {
                         endings = parsed;
@@ -247,6 +280,16 @@ impl<'js> Blob<'js> {
         } else {
             Vec::new()
         };
+
+        let mut mime_type = String::new();
+        if let Some(options) = options.0.as_ref() {
+            if let Some(opts) = options.as_object() {
+                if let Some(x) = opts.get::<_, Option<Coerced<String>>>("type")? {
+                    mime_type = normalize_type(x.to_string());
+                }
+            }
+        }
+
         // Transfer Vec ownership to JS — QuickJS calls the drop callback when
         // the ArrayBuffer is GC'd, so no extra Rust-side copy.
         let data = ArrayBuffer::new(ctx, bytes)?;
@@ -269,7 +312,7 @@ impl<'js> Blob<'js> {
     /// Borrow the underlying bytes directly. Returns `&[]` if the ArrayBuffer
     /// has been detached (shouldn't happen in normal blob flow).
     pub fn as_bytes(&self) -> &[u8] {
-        self.data.as_bytes().unwrap_or(&[])
+        unsafe { self.data.as_bytes() }.unwrap_or(&[])
     }
 }
 
@@ -321,7 +364,7 @@ where
                 continue;
             }
             if let Some(x) = ArrayBuffer::from_object(object.clone()) {
-                data.extend_from_slice(x.as_bytes().ok_or_else(|| {
+                data.extend_from_slice(unsafe { x.as_bytes() }.ok_or_else(|| {
                     Exception::throw_type(ctx, "Cannot create a blob with detached buffer")
                 })?);
                 continue;

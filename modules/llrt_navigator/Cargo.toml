@@ -1,7 +1,7 @@
 [package]
 name = "llrt_navigator"
 description = "LLRT Module navigator"
-version = "0.8.1-beta"
+version = "0.9.0-beta"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/awslabs/llrt"
@@ -12,4 +12,4 @@ name = "llrt_navigator"
 path = "src/lib.rs"
 
 [dependencies]
-rquickjs = { version = "0.12", default-features = false }
+rquickjs = { version = "0.14", default-features = false }

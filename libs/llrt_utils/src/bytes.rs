@@ -1,14 +1,14 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
-use std::{rc::Rc, slice};
+use std::rc::Rc;
 
 use half::f16;
 use rquickjs::{
     atom::PredefinedAtom,
     class::{Trace, Tracer},
     function::Constructor,
-    ArrayBuffer, Coerced, Ctx, Error, Exception, FromJs, IntoJs, JsLifetime, Object, Result,
-    TypedArray, U8Clamped, Value,
+    ArrayBuffer, Coerced, Ctx, Exception, FromJs, IntoJs, JsLifetime, Object, Result, TypedArray,
+    U8Clamped, Value,
 };
 
 /// Convert a JS string to a `String`, replacing lone UTF-16 surrogates
@@ -18,16 +18,10 @@ use rquickjs::{
 // SAFETY (module-wide): QuickJS only emits valid WTF-8, so any run
 // without 0xED is valid strict UTF-8.
 pub fn get_lossy_string(string_value: Value) -> Result<String> {
-    let js_str = string_value.into_string().ok_or_else(|| Error::FromJs {
-        from: "Value",
-        to: "JSString",
-        message: Some("Value is not a string".into()),
-    })?;
-    let cstr = js_str.to_cstring()?;
-    let bytes = unsafe { slice::from_raw_parts(cstr.as_ptr() as *const u8, cstr.len()) };
+    let bytes = get_wtf8_string_bytes(string_value)?;
 
-    let first = match memchr::memchr(0xED, bytes) {
-        None => return Ok(unsafe { String::from_utf8_unchecked(bytes.to_vec()) }),
+    let first = match memchr::memchr(0xED, &bytes) {
+        None => return Ok(unsafe { String::from_utf8_unchecked(bytes) }),
         Some(idx) => idx,
     };
     let mut result = String::with_capacity(bytes.len());
@@ -348,32 +342,37 @@ impl<'js> ObjectBytes<'js> {
         self.as_bytes_inner().or_throw(ctx)
     }
 
-    /// Returns the underlying bytes, or `None` if the buffer is detached.
-    /// Unlike [`as_bytes`], does not raise a JS exception — useful when the
-    /// caller needs to distinguish detachment from other errors (e.g.
-    /// WebIDL-style "treat detached BufferSource as empty").
+    /// Returns the underlying bytes, or `None` if the buffer is detached or
+    /// the DataView range is invalid (including arithmetic overflow). Unlike
+    /// [`as_bytes`], does not raise a JS exception.
     pub fn as_bytes_opt(&self) -> Option<&[u8]> {
         self.as_bytes_inner().ok()
     }
 
     fn as_bytes_inner(&self) -> std::result::Result<&[u8], Rc<str>> {
-        match self {
-            ObjectBytes::U8Array(array) => array.as_bytes(),
-            ObjectBytes::I8Array(array) => array.as_bytes(),
-            ObjectBytes::U16Array(array) => array.as_bytes(),
-            ObjectBytes::I16Array(array) => array.as_bytes(),
-            ObjectBytes::U32Array(array) => array.as_bytes(),
-            ObjectBytes::I32Array(array) => array.as_bytes(),
-            ObjectBytes::U64Array(array) => array.as_bytes(),
-            ObjectBytes::I64Array(array) => array.as_bytes(),
-            ObjectBytes::F16Array(array) => array.as_bytes(),
-            ObjectBytes::F32Array(array) => array.as_bytes(),
-            ObjectBytes::F64Array(array) => array.as_bytes(),
-            ObjectBytes::U8ClampedArray(array) => array.as_bytes(),
-            ObjectBytes::DataView(ab, offset, length) => {
-                ab.as_bytes().map(|b| &b[*offset..*offset + *length])
-            },
-            ObjectBytes::Vec(bytes) => Some(bytes.as_ref()),
+        // Safety: the returned slice is used immediately and no JS runs while
+        // it's alive, so the backing store can't be written, detached, or
+        // reallocated out from under it.
+        unsafe {
+            match self {
+                ObjectBytes::U8Array(array) => array.as_bytes(),
+                ObjectBytes::I8Array(array) => array.as_bytes(),
+                ObjectBytes::U16Array(array) => array.as_bytes(),
+                ObjectBytes::I16Array(array) => array.as_bytes(),
+                ObjectBytes::U32Array(array) => array.as_bytes(),
+                ObjectBytes::I32Array(array) => array.as_bytes(),
+                ObjectBytes::U64Array(array) => array.as_bytes(),
+                ObjectBytes::I64Array(array) => array.as_bytes(),
+                ObjectBytes::F16Array(array) => array.as_bytes(),
+                ObjectBytes::F32Array(array) => array.as_bytes(),
+                ObjectBytes::F64Array(array) => array.as_bytes(),
+                ObjectBytes::U8ClampedArray(array) => array.as_bytes(),
+                ObjectBytes::DataView(ab, offset, length) => ab.as_bytes().and_then(|bytes| {
+                    let end = offset.checked_add(*length)?;
+                    bytes.get(*offset..end)
+                }),
+                ObjectBytes::Vec(bytes) => Some(bytes.as_ref()),
+            }
         }
         .ok_or(ERROR_MSG_ARRAY_BUFFER_DETACHED.into())
     }
@@ -561,6 +560,50 @@ impl<'js> ObjectBytes<'js> {
     }
 }
 
+#[cfg(test)]
+mod object_bytes_tests {
+    use super::{ObjectBytes, ERROR_MSG_ARRAY_BUFFER_DETACHED};
+    use rquickjs::{ArrayBuffer, Context, Runtime};
+
+    #[test]
+    fn data_view_ranges_are_checked() {
+        let rt = Runtime::new().unwrap();
+        let ctx = Context::full(&rt).unwrap();
+
+        ctx.with(|ctx| {
+            let buffer = ArrayBuffer::new_copy(ctx, [1_u8, 2, 3, 4]).unwrap();
+            for (offset, length) in [(3, 2), (usize::MAX, 1)] {
+                let bytes = ObjectBytes::DataView(buffer.clone(), offset, length);
+
+                assert_eq!(
+                    bytes.as_bytes_inner().unwrap_err().as_ref(),
+                    ERROR_MSG_ARRAY_BUFFER_DETACHED
+                );
+            }
+
+            let valid_bytes = ObjectBytes::DataView(buffer, 1, 2);
+            assert_eq!(valid_bytes.as_bytes_inner().unwrap(), &[2, 3]);
+        });
+    }
+
+    #[test]
+    fn data_view_detached_buffer_returns_error() {
+        let rt = Runtime::new().unwrap();
+        let ctx = Context::full(&rt).unwrap();
+
+        ctx.with(|ctx| {
+            let mut buffer = ArrayBuffer::new_copy(ctx, [1_u8, 2, 3, 4]).unwrap();
+            buffer.detach();
+            let bytes = ObjectBytes::DataView(buffer, 0, 4);
+
+            assert_eq!(
+                bytes.as_bytes_inner().unwrap_err().as_ref(),
+                ERROR_MSG_ARRAY_BUFFER_DETACHED
+            );
+        });
+    }
+}
+
 pub fn get_start_end_indexes(
     source_len: usize,
     target_len: Option<usize>,
@@ -627,6 +670,81 @@ pub fn get_string_bytes(
         return Ok(Some(bytes_from_js_string(string, offset, length)));
     }
     Ok(None)
+}
+
+pub fn get_wtf8_string_bytes(value: Value<'_>) -> Result<Vec<u8>> {
+    let ctx = value.ctx().clone();
+    let string = value
+        .into_string()
+        .ok_or_else(|| Exception::throw_type(&ctx, "value must be a string"))?;
+    let cstr = string.to_cstring()?;
+    let bytes: &[u8] = cstr.as_ref();
+    Ok(bytes.to_vec())
+}
+
+pub fn encode_wtf8(bytes: &[u8], pending: &mut Option<u16>, output: &mut Vec<u8>) {
+    let mut index = 0;
+    while index < bytes.len() {
+        let (code_point, width) = decode_wtf8(bytes, index);
+        index += width;
+        let unit = code_point as u16;
+        if let Some(high) = pending.take() {
+            if (0xdc00..=0xdfff).contains(&unit) {
+                let scalar = 0x10000 + (((high - 0xd800) as u32) << 10) + (unit - 0xdc00) as u32;
+                append_code_point(scalar, output);
+                continue;
+            }
+            append_code_point(0xfffd, output);
+        }
+        if (0xd800..=0xdbff).contains(&unit) {
+            *pending = Some(unit);
+        } else if (0xdc00..=0xdfff).contains(&unit) {
+            append_code_point(0xfffd, output);
+        } else {
+            append_code_point(code_point, output);
+        }
+    }
+}
+
+pub fn flush_wtf8(pending: &mut Option<u16>, output: &mut Vec<u8>) {
+    if pending.take().is_some() {
+        append_code_point(0xfffd, output);
+    }
+}
+
+fn decode_wtf8(bytes: &[u8], index: usize) -> (u32, usize) {
+    let first = bytes[index];
+    if first < 0x80 {
+        return (first as u32, 1);
+    }
+    if first < 0xe0 {
+        return (
+            ((first & 0x1f) as u32) << 6 | (bytes[index + 1] & 0x3f) as u32,
+            2,
+        );
+    }
+    if first < 0xf0 {
+        return (
+            ((first & 0x0f) as u32) << 12
+                | ((bytes[index + 1] & 0x3f) as u32) << 6
+                | (bytes[index + 2] & 0x3f) as u32,
+            3,
+        );
+    }
+    (
+        ((first & 0x07) as u32) << 18
+            | ((bytes[index + 1] & 0x3f) as u32) << 12
+            | ((bytes[index + 2] & 0x3f) as u32) << 6
+            | (bytes[index + 3] & 0x3f) as u32,
+        4,
+    )
+}
+
+fn append_code_point(code_point: u32, output: &mut Vec<u8>) {
+    if let Some(ch) = char::from_u32(code_point) {
+        let mut encoded = [0; 4];
+        output.extend_from_slice(ch.encode_utf8(&mut encoded).as_bytes());
+    }
 }
 
 pub fn bytes_to_typed_array<'js>(ctx: Ctx<'js>, bytes: &[u8]) -> Result<Value<'js>> {

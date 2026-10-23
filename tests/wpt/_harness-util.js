@@ -62,11 +62,33 @@ export function createContext({ extras = {}, scripts = [] } = {}) {
   const context = {
     createBuffer: (type, length) => new self[type](length),
     setTimeout,
-    DOMException,
     QuotaExceededError,
     location: {},
     ...extras,
   };
+  Object.defineProperties(context, {
+    console: {
+      value: globalThis.console,
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    },
+    DOMException: {
+      value: DOMException,
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    },
+  });
+  const selfContext = new Proxy(context, {
+    get(target, property, receiver) {
+      if (property === "self") return selfContext;
+      if (Reflect.has(target, property))
+        return Reflect.get(target, property, receiver);
+      return Reflect.get(globalThis, property);
+    },
+  });
+  context.self = selfContext;
   loadWptScript("resources/idlharness.js", context);
   loadWptScript("resources/testharness.js", context);
   loadWptScript("common/gc.js", context);
@@ -80,7 +102,12 @@ export function createContext({ extras = {}, scripts = [] } = {}) {
   return context;
 }
 
-function attachCompletion(context, done, ctx = {}, { allowNoTests = false } = {}) {
+function attachCompletion(
+  context,
+  done,
+  ctx = {},
+  { allowNoTests = false } = {}
+) {
   context.add_completion_callback((tests) => {
     const real = tests.filter(
       ({ name, status }) => !(name === "Loading data..." && status === 0)
@@ -114,7 +141,7 @@ export function loadMetaScripts(source, testDir) {
       try {
         out += fs.readFileSync(path.resolve(base, trimmed), "utf8") + "\n";
         break;
-      } catch { }
+      } catch {}
     }
   }
   return out;
@@ -144,7 +171,7 @@ function baseRunSuite(
   metaUrl,
   harness,
   skipFiles = [],
-  { filePattern, subDir } = {}
+  { filePattern, subDir, tentativeFiles = [] } = {}
 ) {
   const finalSubDir = subDir ?? deriveDefaultSubDir(metaUrl);
   const finalPattern = filePattern ?? /\.any\.js$/;
@@ -156,29 +183,44 @@ function baseRunSuite(
     return false;
   };
 
+  const directoryFiles = fs.readdirSync(targetDir);
+  for (const file of tentativeFiles) {
+    if (!directoryFiles.includes(file)) {
+      throw new Error(`Tentative WPT allowlist entry not found: ${file}`);
+    }
+  }
+  const enabledTentativeFiles = new Set(tentativeFiles);
+
   const skip = (f) =>
-    /\.tentative\./.test(f) ||
+    (/\.tentative\./.test(f) && !enabledTentativeFiles.has(f)) ||
     skipFiles.some((s) => !Array.isArray(s) && matchesFile(f, s));
-  const testFiles = fs
-    .readdirSync(targetDir)
-    .filter((f) => finalPattern.test(f) && !skip(f));
+  const testFiles = directoryFiles.filter(
+    (f) => finalPattern.test(f) && !skip(f)
+  );
 
   describe(finalSubDir, () => {
     for (const file of testFiles) {
-      it(`should pass ${file} tests`, (done) => {
-        const source = fs.readFileSync(path.join(targetDir, file), "utf8");
-        const fileErrorSkipRules = skipFiles.filter(
-          (s) => Array.isArray(s) && matchesFile(file, s[0])
-        );
-        const skipErrors = fileErrorSkipRules.flatMap((s) =>
-          Array.isArray(s[1]) ? s[1] : [s[1]]
-        );
-        harness(source, done, {
-          baseDir: WPT_DIR,
-          testDir: targetDir,
-          ...(skipErrors.length > 0 ? { skipErrors } : {}),
-        });
-      });
+      const source = fs.readFileSync(path.join(targetDir, file), "utf8");
+      const timeout = /^\s*\/\/\s*META:\s*timeout=long\s*$/m.test(source)
+        ? 60_000
+        : undefined;
+      it(
+        `should pass ${file} tests`,
+        (done) => {
+          const fileErrorSkipRules = skipFiles.filter(
+            (s) => Array.isArray(s) && matchesFile(file, s[0])
+          );
+          const skipErrors = fileErrorSkipRules.flatMap((s) =>
+            Array.isArray(s[1]) ? s[1] : [s[1]]
+          );
+          harness(source, done, {
+            baseDir: WPT_DIR,
+            testDir: targetDir,
+            ...(skipErrors.length > 0 ? { skipErrors } : {}),
+          });
+        },
+        timeout
+      );
     }
   });
 }
@@ -195,10 +237,11 @@ export function makeRunnerWPT(config) {
   return baseRunner(config);
 }
 
-export function runSuiteWPT(metaUrl, harness, skipFiles = []) {
+export function runSuiteWPT(metaUrl, harness, skipFiles = [], options = {}) {
   return baseRunSuite(metaUrl, harness, skipFiles, {
-    filePattern: /\.any\.js$/,
-    subDir: deriveSubDir(metaUrl),
+    ...options,
+    filePattern: options.filePattern ?? /\.any\.js$/,
+    subDir: options.subDir ?? deriveSubDir(metaUrl),
   });
 }
 

@@ -141,8 +141,17 @@ pub fn require_resolve<'a>(
 
     // 1'. If X is a bytecode cache,
     if let Some(hooked_resolve) = hooked_fn {
-        if let Ok(path) = hooked_resolve.call::<_, String>((x, y)) {
-            return Ok(path.into());
+        match hooked_resolve.call::<_, String>((x, y)) {
+            Ok(path) => return Ok(path.into()),
+            Err(_) => {
+                // Not found via the hook (e.g. not in the embedded bytecode
+                // cache) is an expected outcome, not a real error: fall
+                // through to normal resolution. Clear the exception the
+                // failed call left pending so it isn't later mistaken for a
+                // real exception by unrelated code (e.g. the module loader's
+                // "is this module already loaded" check).
+                ctx.catch();
+            },
         }
     }
 
@@ -244,13 +253,34 @@ fn resolved_by_file_exists(path: Cow<'_, str>) -> Result<Cow<'_, str>> {
 }
 
 fn to_abs_path(path: Cow<'_, str>) -> Result<Cow<'_, str>> {
-    Ok(if !path::is_absolute(&path) {
-        path::resolve_path_with_separator([path], true)?.into()
-    } else if cfg!(windows) {
-        path::replace_backslash(path).into()
-    } else {
+    let path = if path::is_absolute(&path) {
         path
+    } else {
+        path::resolve_path_with_separator([path], true)?.into()
+    };
+
+    Ok(match normalize_absolute_path(path.as_ref()) {
+        Some(normalized) if normalized != path => normalized.into(),
+        _ => path,
     })
+}
+
+#[cfg(not(windows))]
+fn normalize_absolute_path(path: &str) -> Option<String> {
+    if path == "/"
+        || path
+            .strip_prefix('/')
+            .is_some_and(|path| path.split('/').all(|part| !matches!(part, "" | "." | "..")))
+    {
+        None
+    } else {
+        Some(path::normalize(path))
+    }
+}
+
+#[cfg(windows)]
+fn normalize_absolute_path(path: &str) -> Option<String> {
+    Some(path::replace_backslash(path::normalize(path)))
 }
 
 // LOAD_AS_FILE(X)
@@ -960,4 +990,31 @@ fn correct_extensions<'a>(x: String) -> Cow<'a, str> {
         }
     }
     x.into()
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(windows)]
+    use super::{path, to_abs_path};
+
+    #[cfg(windows)]
+    #[test]
+    fn to_abs_path_normalizes_windows_paths_with_forward_slashes() {
+        let current_dir = std::env::current_dir().unwrap();
+        let path = current_dir
+            .join("fixtures")
+            .join("..")
+            .join("fixtures")
+            .join("cjs-handler.cjs");
+        let path = path::replace_backslash(path.to_string_lossy().to_string());
+
+        let normalized = to_abs_path(path.into()).unwrap();
+
+        let expected = current_dir
+            .join("fixtures")
+            .join("cjs-handler.cjs")
+            .to_string_lossy()
+            .replace('\\', "/");
+        assert_eq!(normalized, expected);
+    }
 }

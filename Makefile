@@ -4,9 +4,12 @@ TARGET_darwin_x86_64 = x86_64-apple-darwin
 TARGET_darwin_arm64 = aarch64-apple-darwin
 TARGET_windows_x86_64 = x86_64-pc-windows-gnu
 TARGET_windows_arm64 = aarch64-is-not-yet-supported
-RUST_VERSION = nightly
+RUST_VERSION = nightly-2026-08-26
 TOOLCHAIN = +$(RUST_VERSION)
 BUILD_ARG = $(TOOLCHAIN) build -r
+ZIGBUILD_ARG = $(TOOLCHAIN) zigbuild -r
+ZIGBUILD_RUN = RUSTUP_TOOLCHAIN=$(RUST_VERSION) cargo-zigbuild run -r
+ZIGBUILD_TEST = RUSTUP_TOOLCHAIN=$(RUST_VERSION) cargo-zigbuild test
 BUILD_DIR = ./target/release
 BUNDLE_DIR = bundle
 
@@ -43,12 +46,17 @@ endif
 
 CURRENT_TARGET ?= $(TARGET_$(DETECTED_OS)_$(ARCH))
 
-export CC_aarch64_unknown_linux_musl = $(CURDIR)/linker/cc-aarch64-linux-musl
-export CXX_aarch64_unknown_linux_musl = $(CURDIR)/linker/cxx-aarch64-linux-musl
-export AR_aarch64_unknown_linux_musl = $(CURDIR)/linker/ar
-export CC_x86_64_unknown_linux_musl = $(CURDIR)/linker/cc-x86_64-linux-musl
-export CXX_x86_64_unknown_linux_musl = $(CURDIR)/linker/cxx-x86_64-linux-musl
-export AR_x86_64_unknown_linux_musl = $(CURDIR)/linker/ar
+ifeq ($(DETECTED_OS),linux)
+CURRENT_BUILD_ARG = $(ZIGBUILD_ARG)
+CURRENT_BUILD_SUBCOMMAND = zigbuild
+CURRENT_TEST = $(ZIGBUILD_TEST)
+CURRENT_RUN = $(ZIGBUILD_RUN)
+else
+CURRENT_BUILD_ARG = $(BUILD_ARG)
+CURRENT_BUILD_SUBCOMMAND = build
+CURRENT_TEST = cargo $(TOOLCHAIN) test
+CURRENT_RUN = cargo $(TOOLCHAIN) run -r
+endif
 
 define alias_template
 release${1}: llrt-$(DETECTED_OS)-$(ARCH)${1}.zip
@@ -67,19 +75,19 @@ release-aws-${1}${2}: | llrt-lambda-${1}${2}.zip llrt-container-${1}${2} llrt-li
 
 llrt-lambda-${1}${2}.zip: export SDK_BUNDLE_MODE = ${3}
 llrt-lambda-${1}${2}.zip: | clean-js js
-	cargo $$(BUILD_ARG) --target $$(TARGET_linux_$$(RELEASE_ARCH_NAME_${1})) --features lambda
+	cargo $$(ZIGBUILD_ARG) --target $$(TARGET_linux_$$(RELEASE_ARCH_NAME_${1})) --features lambda
 	./pack target/$$(TARGET_linux_$$(RELEASE_ARCH_NAME_${1}))/release/llrt target/$$(TARGET_linux_$$(RELEASE_ARCH_NAME_${1}))/release/bootstrap
 	@rm -rf $$@
 	zip -j $$@ target/$$(TARGET_linux_$$(RELEASE_ARCH_NAME_${1}))/release/bootstrap
 
 llrt-container-${1}${2}: export SDK_BUNDLE_MODE = ${3}
 llrt-container-${1}${2}: | clean-js js
-	cargo $$(BUILD_ARG) --target $$(TARGET_linux_$$(RELEASE_ARCH_NAME_${1})) --features lambda,uncompressed
+	cargo $$(ZIGBUILD_ARG) --target $$(TARGET_linux_$$(RELEASE_ARCH_NAME_${1})) --features lambda,uncompressed
 	mv target/$$(TARGET_linux_$$(RELEASE_ARCH_NAME_${1}))/release/llrt $$@
 
 llrt-linux-${1}${2}.zip: export SDK_BUNDLE_MODE = ${3}
 llrt-linux-${1}${2}.zip: | clean-js js
-	cargo $$(BUILD_ARG) --target $$(TARGET_linux_$$(RELEASE_ARCH_NAME_${1}))
+	cargo $$(ZIGBUILD_ARG) --target $$(TARGET_linux_$$(RELEASE_ARCH_NAME_${1}))
 	@rm -rf $$@
 	zip -j $$@ target/$$(TARGET_linux_$$(RELEASE_ARCH_NAME_${1}))/release/llrt
 
@@ -101,7 +109,7 @@ $(foreach target,$(RELEASE_TARGETS),$(eval $(call release_template,$(target),,ST
 $(foreach target,$(RELEASE_TARGETS),$(eval $(call release_template,$(target),-no-sdk,NONE)))
 
 build: js
-	cargo $(BUILD_ARG) --target $(CURRENT_TARGET)
+	cargo $(CURRENT_BUILD_ARG) --target $(CURRENT_TARGET)
 
 ifeq ($(DETECTED_OS),windows)
 stdlib:
@@ -120,12 +128,16 @@ stdlib-arm64:
 	rustup component add rust-src --toolchain $(RUST_VERSION) --target $(TARGET_linux_arm64)
 
 stdlib: | stdlib-x64 stdlib-arm64
+	command -v cargo-zigbuild >/dev/null || cargo install --locked cargo-zigbuild
 endif
 
 toolchain:
 	rustup toolchain install $(RUST_VERSION) --target $(CURRENT_TARGET)
 	rustup target add $(CURRENT_TARGET)
 	rustup component add rust-src --toolchain $(RUST_VERSION) --target $(CURRENT_TARGET)
+ifeq ($(DETECTED_OS),linux)
+	command -v cargo-zigbuild >/dev/null || cargo install --locked cargo-zigbuild
+endif
 
 clean-js:
 	rm -rf ./bundle
@@ -146,7 +158,7 @@ fix:
 	cargo fmt
 
 bloat: js
-	cargo build --profile=flame --target $(CURRENT_TARGET)
+	cargo $(CURRENT_BUILD_SUBCOMMAND) --profile=flame --target $(CURRENT_TARGET)
 	cargo bloat --profile=flame --crates
 
 run: export AWS_LAMBDA_FUNCTION_NAME = n/a
@@ -179,7 +191,7 @@ test: export JS_MINIFY = 0
 test: export TEST_SUB_DIR = unit
 test: export LLRT_ASYNC_HOOKS = 1
 test: js
-	cargo run -- test -d bundle/js/__tests__/$(TEST_SUB_DIR)
+	cargo run --features intl402 -- test -d bundle/js/__tests__/$(TEST_SUB_DIR)
 
 setup-wpt:
 	@if [ ! -d wpt/.git ]; then \
@@ -257,7 +269,7 @@ test-wpt: setup-wpt js
 		[ -n "$$ready" ] || { echo " timeout."; cat wpt_server.log; exit 1; }; \
 	done; \
 	npx pretty-quick --pattern "tests/wpt/**/*.{js,ts,json}"; \
-	TEST_REPORT_FILE=wpt_errors.txt cargo run -- test -d bundle/js/__tests__/$(TEST_SUB_DIR); \
+	TEST_REPORT_FILE=wpt_errors.txt cargo run --features intl402 -- test -d bundle/js/__tests__/$(TEST_SUB_DIR); \
 	test_status=$$?; \
 	kill $$WPT_PID 2>/dev/null || :; \
 	exit $$test_status
@@ -313,7 +325,7 @@ test-e2e: export TEST_TIMEOUT = 60000
 test-e2e: export SDK_BUNDLE_MODE = STD
 test-e2e: export TEST_SUB_DIR = e2e
 test-e2e: setup-e2e js
-	eval $$($(MAKE) e2e-env) && cargo run -- test -d bundle/js/__tests__/$(TEST_SUB_DIR) s3
+	eval $$($(MAKE) e2e-env) && cargo run -- test -d bundle/js/__tests__/$(TEST_SUB_DIR) $(TEST_FILTER)
 
 test-ci: export JS_MINIFY = 0
 test-ci: export RUST_BACKTRACE = 1
@@ -321,11 +333,11 @@ test-ci: export TEST_SUB_DIR = unit
 test-ci: export LLRT_ASYNC_HOOKS = 1
 test-ci: clean-js | toolchain js
 ifdef CARGO_FEATURES
-	cargo $(TOOLCHAIN) -Z build-std -Z build-std-features test --target $(CURRENT_TARGET) $(CARGO_FEATURES) -- --nocapture --show-output
-	cargo $(TOOLCHAIN) run -r --target $(CURRENT_TARGET) $(CARGO_FEATURES) -- test -d bundle/js/__tests__/$(TEST_SUB_DIR)
+	$(CURRENT_TEST) --target $(CURRENT_TARGET) -Z build-std -Z build-std-features $(CARGO_FEATURES) -- --nocapture --show-output
+	$(CURRENT_RUN) --target $(CURRENT_TARGET) $(CARGO_FEATURES) -- test -d bundle/js/__tests__/$(TEST_SUB_DIR)
 else
-	cargo $(TOOLCHAIN) -Z build-std -Z build-std-features test --target $(CURRENT_TARGET) --features lambda -- --nocapture --show-output
-	cargo $(TOOLCHAIN) run -r --target $(CURRENT_TARGET) -- test -d bundle/js/__tests__/$(TEST_SUB_DIR)
+	$(CURRENT_TEST) --target $(CURRENT_TARGET) -Z build-std -Z build-std-features --features lambda -- --nocapture --show-output
+	$(CURRENT_RUN) --target $(CURRENT_TARGET) -- test -d bundle/js/__tests__/$(TEST_SUB_DIR)
 endif
 
 libs-arm64: lib/arm64/libzstd.a lib/zstd.h lib/zstd_errors.h
@@ -359,9 +371,11 @@ deploy:
 	cd example/infrastructure && yarn deploy --require-approval never
 
 check:
+	cargo clippy --all-targets --no-default-features --features "lambda,macro,no-sdk,uncompressed,crypto-rust,tls-ring,pqc,intl402" -- -D warnings
 	cargo clippy --all-targets --no-default-features --features "lambda,macro,no-sdk,uncompressed,crypto-rust,tls-ring" -- -D warnings
 
 test-rs:
+	cargo test --all-targets --no-default-features --features "lambda,macro,no-sdk,uncompressed,crypto-rust,tls-ring,pqc,intl402"
 	cargo test --all-targets --no-default-features --features "lambda,macro,no-sdk,uncompressed,crypto-rust,tls-ring"
 
 check-crates:

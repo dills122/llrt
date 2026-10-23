@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use llrt_encoding::Encoder;
 use llrt_utils::{bytes::ObjectBytes, object::ObjectExt, result::ResultExt};
-use rquickjs::{atom::PredefinedAtom, function::Opt, Ctx, Object, Result, Value};
+use rquickjs::{atom::PredefinedAtom, convert::Coerced, function::Opt, Ctx, Object, Result, Value};
 use std::cell::{Cell, RefCell};
 
 #[rquickjs::class]
@@ -73,11 +73,11 @@ impl<'js> TextDecoder {
         let encoder = Encoder::from_optional_str(label.as_deref()).or_throw_range(&ctx, "")?;
 
         if let Some(opts) = options.0 {
-            if let Some(opt) = opts.get_optional("fatal")? {
-                fatal = opt;
+            if let Some(opt) = opts.get_optional::<_, Coerced<bool>>("fatal")? {
+                fatal = opt.0;
             }
-            if let Some(opt) = opts.get_optional("ignoreBOM")? {
-                ignore_bom = opt;
+            if let Some(opt) = opts.get_optional::<_, Coerced<bool>>("ignoreBOM")? {
+                ignore_bom = opt.0;
             }
         }
 
@@ -146,10 +146,6 @@ impl<'js> TextDecoder {
             &combined
         };
 
-        if !stream {
-            self.bom_seen.set(false);
-        }
-
         // Strip BOM if needed (only on first chunk of a decode sequence)
         if !self.ignore_bom && !self.bom_seen.get() {
             let skip = match self.encoder {
@@ -209,8 +205,19 @@ impl<'js> TextDecoder {
             }
         }
 
-        self.encoder
+        let result = self
+            .encoder
             .encode_to_string(&data[..decode_end], !self.fatal)
-            .or_throw_type(&ctx, "")
+            .inspect_err(|_| {
+                pending.clear();
+                self.bom_seen.set(false);
+            })
+            .or_throw_type(&ctx, "")?;
+
+        if !stream {
+            self.bom_seen.set(false);
+        }
+
+        Ok(result)
     }
 }

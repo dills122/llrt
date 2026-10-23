@@ -16,7 +16,10 @@ use aes_gcm::{
 use aes_kw::{KwAes128, KwAes192, KwAes256};
 use cbc::{Decryptor, Encryptor};
 use ctr::{cipher::Array, Ctr128BE, Ctr32BE, Ctr64BE};
-use der::Encode;
+use der::{
+    asn1::{BitStringRef, OctetString, OctetStringRef},
+    Decode, Encode,
+};
 use ecdsa::signature::hazmat::PrehashVerifier;
 use ed25519_dalek::{Signature, Signer, VerifyingKey};
 use elliptic_curve::{consts::U12, sec1::ToSec1Point, Generate};
@@ -984,8 +987,8 @@ impl CryptoProvider for RustCryptoProvider {
         der: &[u8],
     ) -> Result<super::RsaImportResult, CryptoError> {
         use der::Decode;
-        let public_key =
-            rsa::pkcs1::RsaPublicKey::from_der(der).map_err(|_| CryptoError::InvalidKey(None))?;
+        let public_key = rsa::pkcs1::RsaPublicKey::<der::asn1::UintRef>::from_der(der)
+            .map_err(|_| CryptoError::InvalidKey(None))?;
         let modulus_length = public_key.modulus.as_bytes().len() * 8;
         let public_exponent = public_key.public_exponent.as_bytes().to_vec();
         let key_data = public_key
@@ -1004,8 +1007,8 @@ impl CryptoProvider for RustCryptoProvider {
         der: &[u8],
     ) -> Result<super::RsaImportResult, CryptoError> {
         use der::Decode;
-        let private_key =
-            rsa::pkcs1::RsaPrivateKey::from_der(der).map_err(|_| CryptoError::InvalidKey(None))?;
+        let private_key = rsa::pkcs1::RsaPrivateKey::<der::asn1::UintRef>::from_der(der)
+            .map_err(|_| CryptoError::InvalidKey(None))?;
         let modulus_length = private_key.modulus.as_bytes().len() * 8;
         let public_exponent = private_key.public_exponent.as_bytes().to_vec();
         let key_data = private_key
@@ -1026,8 +1029,10 @@ impl CryptoProvider for RustCryptoProvider {
         use der::Decode;
         let spki = spki::SubjectPublicKeyInfoRef::try_from(der)
             .map_err(|_| CryptoError::InvalidKey(None))?;
-        let public_key = rsa::pkcs1::RsaPublicKey::from_der(spki.subject_public_key.raw_bytes())
-            .map_err(|_| CryptoError::InvalidKey(None))?;
+        let public_key = rsa::pkcs1::RsaPublicKey::<der::asn1::UintRef>::from_der(
+            spki.subject_public_key.raw_bytes(),
+        )
+        .map_err(|_| CryptoError::InvalidKey(None))?;
         let modulus_length = public_key.modulus.as_bytes().len() * 8;
         let public_exponent = public_key.public_exponent.as_bytes().to_vec();
         let key_data = public_key
@@ -1048,8 +1053,10 @@ impl CryptoProvider for RustCryptoProvider {
         use der::Decode;
         let pk_info =
             pkcs8::PrivateKeyInfoRef::from_der(der).map_err(|_| CryptoError::InvalidKey(None))?;
-        let private_key = rsa::pkcs1::RsaPrivateKey::from_der(pk_info.private_key.as_bytes())
-            .map_err(|_| CryptoError::InvalidKey(None))?;
+        let private_key = rsa::pkcs1::RsaPrivateKey::<der::asn1::UintRef>::from_der(
+            pk_info.private_key.as_bytes(),
+        )
+        .map_err(|_| CryptoError::InvalidKey(None))?;
         let modulus_length = private_key.modulus.as_bytes().len() * 8;
         let public_exponent = private_key.public_exponent.as_bytes().to_vec();
         let key_data = pk_info.private_key.as_bytes().to_vec();
@@ -1068,7 +1075,7 @@ impl CryptoProvider for RustCryptoProvider {
 
     fn export_rsa_public_key_spki(&self, key_data: &[u8]) -> Result<Vec<u8>, CryptoError> {
         use der::{Decode, Encode};
-        let public_key = rsa::pkcs1::RsaPublicKey::from_der(key_data)
+        let public_key = rsa::pkcs1::RsaPublicKey::<der::asn1::UintRef>::from_der(key_data)
             .map_err(|_| CryptoError::InvalidKey(None))?;
         let spki = spki::SubjectPublicKeyInfo {
             algorithm: spki::AlgorithmIdentifier::<der::asn1::Any> {
@@ -1097,21 +1104,41 @@ impl CryptoProvider for RustCryptoProvider {
     fn import_ec_public_key_sec1(
         &self,
         data: &[u8],
-        _curve: EllipticCurve,
+        curve: EllipticCurve,
     ) -> Result<super::EcImportResult, CryptoError> {
+        let key_data = match curve {
+            EllipticCurve::P256 => {
+                let public_key = p256::PublicKey::from_sec1_bytes(data)
+                    .map_err(|_| CryptoError::InvalidKey(None))?;
+                public_key.to_sec1_point(false).as_bytes().to_vec()
+            },
+            EllipticCurve::P384 => {
+                let public_key = p384::PublicKey::from_sec1_bytes(data)
+                    .map_err(|_| CryptoError::InvalidKey(None))?;
+                public_key.to_sec1_point(false).as_bytes().to_vec()
+            },
+            EllipticCurve::P521 => {
+                let public_key = p521::PublicKey::from_sec1_bytes(data)
+                    .map_err(|_| CryptoError::InvalidKey(None))?;
+                public_key.to_sec1_point(false).as_bytes().to_vec()
+            },
+        };
+
         Ok(super::EcImportResult {
-            key_data: data.to_vec(),
+            key_data,
             is_private: false,
         })
     }
 
-    fn import_ec_public_key_spki(&self, der: &[u8]) -> Result<super::EcImportResult, CryptoError> {
+    fn import_ec_public_key_spki(
+        &self,
+        der: &[u8],
+        curve: EllipticCurve,
+    ) -> Result<super::EcImportResult, CryptoError> {
         let spki = spki::SubjectPublicKeyInfoRef::try_from(der)
             .map_err(|_| CryptoError::InvalidKey(None))?;
-        Ok(super::EcImportResult {
-            key_data: spki.subject_public_key.raw_bytes().to_vec(),
-            is_private: false,
-        })
+        let point = spki.subject_public_key.raw_bytes();
+        self.import_ec_public_key_sec1(point, curve)
     }
 
     fn import_ec_private_key_pkcs8(
@@ -1230,7 +1257,7 @@ impl CryptoProvider for RustCryptoProvider {
         data: &[u8],
     ) -> Result<super::OkpImportResult, CryptoError> {
         if data.len() != 32 {
-            return Err(CryptoError::InvalidKey(None));
+            return Err(CryptoError::InvalidLength);
         }
         Ok(super::OkpImportResult {
             key_data: data.to_vec(),
@@ -1310,10 +1337,34 @@ impl CryptoProvider for RustCryptoProvider {
     fn export_okp_private_key_pkcs8(
         &self,
         key_data: &[u8],
-        _oid: &[u8],
+        oid: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
-        // key_data is already PKCS8
-        Ok(key_data.to_vec())
+        // Ed25519: key_data is already PKCS#8.
+        if oid == const_oid::db::rfc8410::ID_ED_25519.as_bytes() {
+            return Ok(key_data.to_vec());
+        }
+        // X25519: key_data is the raw 32-byte private scalar.
+        if oid == const_oid::db::rfc8410::ID_X_25519.as_bytes() {
+            if key_data.len() != 32 {
+                return Err(CryptoError::InvalidKey(None));
+            }
+
+            // RFC 8410 requires the privateKey field to contain
+            // an encoded OCTET STRING containing the 32-byte scalar.
+            let inner = OctetStringRef::new(key_data).map_err(|_| CryptoError::InvalidKey(None))?;
+            let inner_der = inner.to_der().map_err(|_| CryptoError::InvalidKey(None))?;
+            let pk_info = pkcs8::PrivateKeyInfoRef {
+                algorithm: spki::AlgorithmIdentifier {
+                    oid: const_oid::db::rfc8410::ID_X_25519,
+                    parameters: None,
+                },
+                private_key: OctetStringRef::new(&inner_der)
+                    .map_err(|_| CryptoError::InvalidKey(None))?,
+                public_key: None,
+            };
+            return pk_info.to_der().map_err(|_| CryptoError::InvalidKey(None));
+        }
+        Err(CryptoError::InvalidKey(None))
     }
 
     fn import_rsa_jwk(
@@ -1371,7 +1422,7 @@ impl CryptoProvider for RustCryptoProvider {
     ) -> Result<super::RsaJwkExport, CryptoError> {
         use der::Decode;
         if is_private {
-            let key = rsa::pkcs1::RsaPrivateKey::from_der(key_data)
+            let key = rsa::pkcs1::RsaPrivateKey::<der::asn1::UintRef>::from_der(key_data)
                 .map_err(|_| CryptoError::InvalidKey(None))?;
             Ok(super::RsaJwkExport {
                 n: key.modulus.as_bytes().to_vec(),
@@ -1384,7 +1435,7 @@ impl CryptoProvider for RustCryptoProvider {
                 qi: Some(key.coefficient.as_bytes().to_vec()),
             })
         } else {
-            let key = rsa::pkcs1::RsaPublicKey::from_der(key_data)
+            let key = rsa::pkcs1::RsaPublicKey::<der::asn1::UintRef>::from_der(key_data)
                 .map_err(|_| CryptoError::InvalidKey(None))?;
             Ok(super::RsaJwkExport {
                 n: key.modulus.as_bytes().to_vec(),
@@ -1518,10 +1569,6 @@ impl CryptoProvider for RustCryptoProvider {
             // Private key - for Ed25519 we need PKCS8, for X25519 we store raw
             if is_ed25519 {
                 // Ed25519: construct PKCS8 from raw private key
-                use der::{
-                    asn1::{BitStringRef, OctetStringRef},
-                    Encode,
-                };
                 let pk_info = pkcs8::PrivateKeyInfoRef {
                     algorithm: spki::AlgorithmIdentifier {
                         oid: const_oid::db::rfc8410::ID_ED_25519,
@@ -1565,20 +1612,29 @@ impl CryptoProvider for RustCryptoProvider {
     ) -> Result<super::OkpJwkExport, CryptoError> {
         if is_private {
             if is_ed25519 {
-                // Ed25519: key_data is PKCS8
-                use der::Decode;
+                // Ed25519: key_data is complete PKCS#8 DER.
                 let pk_info = pkcs8::PrivateKeyInfoRef::from_der(key_data)
                     .map_err(|_| CryptoError::InvalidKey(None))?;
-                let d = pk_info.private_key.as_bytes();
+                let d = OctetString::from_der(pk_info.private_key.as_bytes())
+                    .map_err(|_| CryptoError::InvalidKey(None))?
+                    .as_bytes()
+                    .to_vec();
+
+                if d.len() != 32 {
+                    return Err(CryptoError::InvalidKey(None));
+                }
+
                 let x = pk_info
                     .public_key
                     .ok_or(CryptoError::InvalidKey(None))?
                     .raw_bytes()
                     .to_vec();
-                Ok(super::OkpJwkExport {
-                    x,
-                    d: Some(d.to_vec()),
-                })
+
+                if x.len() != 32 {
+                    return Err(CryptoError::InvalidKey(None));
+                }
+
+                Ok(super::OkpJwkExport { x, d: Some(d) })
             } else {
                 // X25519: key_data is raw 32-byte secret
                 let secret = x25519_dalek::StaticSecret::from(

@@ -1,16 +1,19 @@
 [package]
 name = "llrt_core"
-version = "0.8.1-beta"
+version = "0.9.0-beta"
 edition = "2021"
 license-file = "LICENSE"
 
 [features]
-default = ["macro", "tls-ring", "crypto-rust"]
+default = ["macro", "tls-ring", "crypto-rust", "pqc"]
 lambda = []
 no-sdk = ["llrt_modules/no-sdk"]
 uncompressed = []
 macro = ["rquickjs/macro"]
 bindgen = ["rquickjs/bindgen"]
+
+pqc = ["llrt_modules/pqc"]
+intl402 = ["llrt_modules/intl402"]
 
 # TLS crypto backend features
 tls-ring = ["rustls/ring", "llrt_modules/tls-ring"]
@@ -50,12 +53,12 @@ llrt_numbers = { path = "../libs/llrt_numbers" }
 llrt_utils = { path = "../libs/llrt_utils", features = ["all"] }
 once_cell = { version = "1", features = ["std"], default-features = false }
 phf = { version = "0.14", default-features = false }
-quick-xml = { version = "0.41", default-features = false }
+quick-xml = { version = "0.42", default-features = false }
 rand = { version = "0.10", features = [
   "alloc",
   "thread_rng",
 ], default-features = false }
-rquickjs = { version = "0.12", features = [
+rquickjs = { version = "0.14", features = [
   "futures",
   "parallel",
   "rust-alloc",
@@ -63,11 +66,11 @@ rquickjs = { version = "0.12", features = [
 rustls = { version = "0.23", features = ["tls12"], default-features = false }
 rustls-pemfile = { version = "2", features = ["std"], default-features = false }
 ryu = { version = "1", default-features = false }
-simd-json = { version = "0.17", default-features = false }
+simd-json = { version = "0.18", default-features = false }
 terminal_size = { version = "0.4", default-features = false }
 tokio = { version = "1", features = ["sync", "time"], default-features = false }
 tracing = { version = "0.1", features = ["log"], default-features = false }
-zstd = { version = "0.13", default-features = false }
+zstd = { version = "0.14", default-features = false }
 openssl = { version = "0.10", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -76,7 +79,7 @@ md-5 = { version = "0.11", default-features = false }
 md-5 = { version = "0.11", default-features = false }
 
 [build-dependencies]
-rquickjs = { version = "0.12", default-features = false }
+rquickjs = { version = "0.14", default-features = false }
 phf_codegen = { version = "0.14", default-features = false }
 llrt_build = { path = "../libs/llrt_build" }
 uuid = { version = "1", features = ["v4"], default-features = false }
@@ -85,7 +88,7 @@ walkdir = { version = "2", default-features = false }
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false }
 llrt_test = { path = "../libs/llrt_test" }
-rquickjs = { version = "0.12", default-features = false }
+rquickjs = { version = "0.14", default-features = false }
 wiremock = { version = "0.6", default-features = false }
 
 [[bench]]
