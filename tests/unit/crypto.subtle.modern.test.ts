@@ -811,29 +811,60 @@ describe("Modern WebCrypto hybrid KEMs", () => {
     ).toEqual(new Uint8Array(encapsulated.sharedKey));
   });
 
-  it("round-trips hybrid raw and JWK keys", async () => {
-    const name = "MLKEM768-X25519";
-    const keyPair = await crypto.subtle.generateKey(name, true, [
-      "encapsulateBits",
-      "decapsulateBits",
-    ]);
-    for (const [key, formats, usages] of [
-      [keyPair.publicKey, ["raw-public", "jwk"], ["encapsulateBits"]],
-      [keyPair.privateKey, ["raw-seed", "jwk"], ["decapsulateBits"]],
-    ] as const) {
-      for (const format of formats) {
-        const encoded = await crypto.subtle.exportKey(format, key);
-        const imported = await crypto.subtle.importKey(
-          format,
-          encoded,
-          name,
-          true,
-          usages
-        );
-        expect(imported.type).toBe(key.type);
+  for (const name of [
+    "MLKEM768-P256",
+    "MLKEM768-X25519",
+    "MLKEM1024-P384",
+  ] as const) {
+    it(`round-trips ${name} raw and JWK keys`, async () => {
+      const keyPair = await crypto.subtle.generateKey(name, true, [
+        "encapsulateBits",
+        "decapsulateBits",
+      ]);
+      for (const [key, formats, usages] of [
+        [keyPair.publicKey, ["raw-public", "jwk"], ["encapsulateBits"]],
+        [keyPair.privateKey, ["raw-seed", "jwk"], ["decapsulateBits"]],
+      ] as const) {
+        for (const format of formats) {
+          const encoded = await crypto.subtle.exportKey(format, key);
+          const imported = await crypto.subtle.importKey(
+            format,
+            encoded,
+            name,
+            true,
+            usages
+          );
+          expect(imported.type).toBe(key.type);
+          expect(imported.algorithm).toEqual(key.algorithm);
+          expect(imported.usages).toEqual(key.usages);
+          expect(imported.extractable).toBe(true);
+          const exported = await crypto.subtle.exportKey(format, imported);
+          if (format === "jwk") {
+            expect(exported).toEqual(encoded);
+          } else {
+            expect(new Uint8Array(exported as ArrayBuffer)).toEqual(
+              new Uint8Array(encoded as ArrayBuffer)
+            );
+          }
+
+          // Check each imported key against the original counterpart so that
+          // matching import/export bugs cannot silently replace the key pair.
+          const encapsulated = await crypto.subtle.encapsulateBits(
+            name,
+            key.type === "public" ? imported : keyPair.publicKey
+          );
+          const decapsulated = await crypto.subtle.decapsulateBits(
+            name,
+            key.type === "private" ? imported : keyPair.privateKey,
+            encapsulated.ciphertext
+          );
+          expect(new Uint8Array(decapsulated)).toEqual(
+            new Uint8Array(encapsulated.sharedKey)
+          );
+        }
       }
-    }
-  });
+    });
+  }
 
   it("rejects DER key formats", async () => {
     const keyPair = await crypto.subtle.generateKey("MLKEM768-P256", true, [
