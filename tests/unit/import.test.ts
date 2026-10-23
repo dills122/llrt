@@ -72,6 +72,40 @@ describe("import", () => {
     expect(mod.default()).toBe("hello from default");
   });
 
+  it("should preserve CJS export names that are not binding identifiers", async () => {
+    const filename = `${CWD}/fixtures/cjs-export-names.cjs`;
+    const mod = await import(filename);
+    const expected = {
+      value: 1,
+      class: 2,
+      "a-b": 3,
+      "": 4,
+      0: 5,
+      'a"b': 6,
+      "a\\b": 7,
+      "a\nb": 8,
+      __llrt_export_0: 9,
+      π: 10,
+    };
+
+    expect(mod.default).toEqual(expected);
+    expect(Object.keys(mod).sort()).toEqual(
+      [...Object.keys(expected), "default"].sort()
+    );
+    for (const [key, value] of Object.entries(expected)) {
+      expect(mod[key]).toBe(value);
+    }
+  });
+
+  it("should support static imports of CJS names requiring aliases", async () => {
+    const filename = `${CWD}/fixtures/cjs-export-names.mjs`;
+    const mod = await import(filename);
+
+    expect(mod.value).toBe(1);
+    expect(mod.reserved).toBe(2);
+    expect(mod.hyphenated).toBe(3);
+  });
+
   it("regression testing for issue #1492", async () => {
     await import(`${CWD}/fixtures/test1492/index.js`);
   });

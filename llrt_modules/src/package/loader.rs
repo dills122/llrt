@@ -1,6 +1,6 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
-use std::{cell::RefCell, fs::File, io::Read};
+use std::{cell::RefCell, fmt::Write, fs::File, io::Read};
 
 use llrt_json::escape::escape_json_string;
 use llrt_utils::result::ResultExt;
@@ -145,28 +145,18 @@ impl Loader for PackageLoader {
 }
 
 fn append_named_exports(module: &mut String, keys: &[String]) {
-    let named_keys = keys
+    let mut escaped = String::new();
+    for (index, key) in keys
         .iter()
         .filter(|key| key.as_str() != "default")
-        .collect::<Vec<_>>();
-
-    if named_keys.is_empty() {
-        return;
+        .enumerate()
+    {
+        // Property names need not be valid bindings and may collide with `value`.
+        escaped.clear();
+        escape_json_string(&mut escaped, key.as_bytes());
+        write!(module, "const __llrt_export_{index}=value[\"{escaped}\"];").unwrap();
+        write!(module, "export{{__llrt_export_{index} as \"{escaped}\"}};").unwrap();
     }
-
-    module.push_str("const{");
-    for key in &named_keys {
-        module.push_str(key);
-        module.push(',');
-    }
-    module.truncate(module.len() - 1);
-    module.push_str("}=value;export{");
-    for key in named_keys {
-        module.push_str(key);
-        module.push(',');
-    }
-    module.truncate(module.len() - 1);
-    module.push_str("};");
 }
 
 #[cfg(test)]
