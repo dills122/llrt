@@ -696,7 +696,8 @@ fn load_package_exports<'a>(
         [dir, "/", scope, "/", &module_path].concat(),
     ))?;
 
-    if is_cjs && is_esm {
+    // An explicit .mjs target is ESM regardless of the package's type.
+    if is_cjs && is_esm && !module_path.ends_with(".mjs") {
         return Ok([CJS_LOADER_PREFIX, &module_path].concat().into());
     }
 
