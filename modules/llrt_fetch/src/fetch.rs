@@ -469,9 +469,8 @@ async fn send<'js>(
         let location = location
             .to_str()
             .or_throw_type(ctx, "Invalid redirect URL")?;
-        let mut target = url::Url::parse(&uri.to_string())
-            .and_then(|base| base.join(location))
-            .or_throw_type(ctx, "Invalid redirect URL")?;
+        let mut target =
+            resolve_redirect_url(uri, location).or_throw_type(ctx, "Invalid redirect URL")?;
         // Fragments are not sent in HTTP requests or exposed in Response.url.
         target.set_fragment(None);
         let target = target
@@ -485,6 +484,19 @@ async fn send<'js>(
     };
 
     Ok((res, redirect_count > 0, guard))
+}
+
+fn resolve_redirect_url(
+    uri: &Uri,
+    location: &str,
+) -> std::result::Result<url::Url, url::ParseError> {
+    // HTTP accepts hosts such as service.123 that the URL parser rejects.
+    // Absolute destinations still work without a base; relative destinations
+    // retain URL resolution semantics whenever the source can be parsed.
+    let base = url::Url::parse(&uri.to_string());
+    url::Url::options()
+        .base_url(base.as_ref().ok())
+        .parse(location)
 }
 
 fn apply_default_headers(
@@ -1098,6 +1110,34 @@ mod tests {
 
         assert!(!is_request_body_header_name("content-length"));
         assert!(!is_request_body_header_name("accept"));
+    }
+
+    #[test]
+    fn absolute_redirect_does_not_require_a_parseable_source_host() {
+        let source: Uri = "http://service.123:49151/start".parse().unwrap();
+        for location in ["http://example.com/end", "https://example.com/end#fragment"] {
+            assert_eq!(
+                resolve_redirect_url(&source, location).unwrap().as_str(),
+                location
+            );
+        }
+        assert!(resolve_redirect_url(&source, "http://[invalid").is_err());
+        assert!(resolve_redirect_url(&source, "../end").is_err());
+    }
+
+    #[test]
+    fn redirect_resolution_preserves_base_url_semantics() {
+        let source: Uri = "http://example.com/a/start".parse().unwrap();
+        for (location, expected) in [
+            ("../end", "http://example.com/end"),
+            ("http:next", "http://example.com/a/next"),
+            ("//other.example/end", "http://other.example/end"),
+        ] {
+            assert_eq!(
+                resolve_redirect_url(&source, location).unwrap().as_str(),
+                expected
+            );
+        }
     }
 
     #[test]
