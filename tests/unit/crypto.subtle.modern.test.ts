@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 import type { webcrypto } from "node:crypto";
 
+// Match the build configuration explicitly; never infer support by swallowing
+// a key-generation failure, which could hide a regression in a PQC build.
+const PQC_ENABLED = process.env.LLRT_TEST_PQC !== "0";
+const pqc = PQC_ENABLED ? describe : describe.skip;
+
 const DATA = new TextEncoder().encode("modern WebCrypto");
 
 describe("Modern WebCrypto key formats", () => {
@@ -339,7 +344,7 @@ describe("Modern WebCrypto ChaCha20-Poly1305", () => {
   });
 });
 
-describe("Modern WebCrypto ML-DSA", () => {
+pqc("Modern WebCrypto ML-DSA", () => {
   it("signs and verifies with every parameter set and context", async () => {
     for (const name of ["ML-DSA-44", "ML-DSA-65", "ML-DSA-87"] as const) {
       const keyPair = await crypto.subtle.generateKey(name, false, [
@@ -488,7 +493,7 @@ describe("Modern WebCrypto ML private-key formats", () => {
   });
 });
 
-describe("Modern WebCrypto ML-KEM", () => {
+pqc("Modern WebCrypto ML-KEM", () => {
   it("encapsulates and decapsulates bits for every parameter set", async () => {
     const variants = [
       ["ML-KEM-512", 768],
@@ -741,7 +746,26 @@ describe("Modern WebCrypto ML-KEM", () => {
   });
 });
 
-describe("Modern WebCrypto hybrid KEMs", () => {
+if (!PQC_ENABLED) {
+  describe("Hybrid KEMs without PQC", () => {
+    for (const name of [
+      "MLKEM768-P256",
+      "MLKEM768-X25519",
+      "MLKEM1024-P384",
+    ] as const) {
+      it(`rejects ${name} key generation as unsupported`, async () => {
+        await expect(
+          crypto.subtle.generateKey(name, true, [
+            "encapsulateBits",
+            "decapsulateBits",
+          ])
+        ).rejects.toHaveProperty("name", "NotSupportedError");
+      });
+    }
+  });
+}
+
+pqc("Modern WebCrypto hybrid KEMs", () => {
   it("encapsulates and decapsulates every hybrid variant", async () => {
     const variants = [
       ["MLKEM768-P256", 1249, 1153],
@@ -924,6 +948,13 @@ describe("SubtleCrypto.getPublicKey", () => {
     ] as const;
 
     for (const [algorithm, keyUsages, publicUsages] of cases) {
+      const name = typeof algorithm === "string" ? algorithm : algorithm.name;
+      if (!PQC_ENABLED && name.startsWith("ML")) {
+        await expect(
+          crypto.subtle.generateKey(algorithm, true, keyUsages)
+        ).rejects.toHaveProperty("name", "NotSupportedError");
+        continue;
+      }
       const keyPair = await crypto.subtle.generateKey(
         algorithm,
         true,
