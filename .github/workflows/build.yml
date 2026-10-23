@@ -120,6 +120,8 @@ jobs:
         if: inputs.platform != 'windows'
         env:
           CARGO_FEATURES: ${{ steps.features.outputs.cargo_features }}
+          # Explicit provider builds omit PQC; default builds include it.
+          LLRT_TEST_PQC: ${{ inputs.crypto != '' && '0' || '1' }}
         run: |
           make test-ci 2>&1
       - name: Run tests on windows
@@ -127,6 +129,8 @@ jobs:
         shell: msys2 {0}
         env:
           CARGO_FEATURES: ${{ steps.features.outputs.cargo_features }}
+          # Explicit provider builds omit PQC; default builds include it.
+          LLRT_TEST_PQC: ${{ inputs.crypto != '' && '0' || '1' }}
         run: |
           set -e
           make test-ci 2>&1

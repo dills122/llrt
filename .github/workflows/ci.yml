@@ -61,6 +61,50 @@ jobs:
           toolchain: stable
       - name: Run WPT
         run: make check-wpt
+  crypto-pqc:
+    needs: check
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        provider: [rust, openssl]
+        pqc: ["0", "1"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          cache: yarn
+          node-version: lts/*
+      - name: Install JavaScript dependencies
+        run: |
+          corepack enable
+          yarn
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: stable
+      - name: Build test bundles
+        run: JS_MINIFY=0 TEST_SUB_DIR=unit node build.mjs
+      - name: Test modern WebCrypto with and without PQC
+        env:
+          LLRT_TEST_PQC: ${{ matrix.pqc }}
+          CRYPTO_PROVIDER: ${{ matrix.provider }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          features="macro,tls-ring,crypto-${CRYPTO_PROVIDER}"
+          if [ "$LLRT_TEST_PQC" = "1" ]; then
+            features="$features,pqc"
+          fi
+          cargo run --locked --no-default-features --features "$features" -- \
+            test -d bundle/js/__tests__/unit crypto.subtle.modern | tee crypto-tests.log
+          # The runtime runner currently returns zero even for failed assertions.
+          grep -Eq '[1-9][0-9]* passed, 0 failed, [0-9]+ skipped, [1-9][0-9]* tests' crypto-tests.log
+          if [ "$LLRT_TEST_PQC" = "1" ]; then
+            grep -Eq '[1-9][0-9]* passed, 0 failed, 0 skipped,' crypto-tests.log
+          fi
   build:
     needs:
       - check
