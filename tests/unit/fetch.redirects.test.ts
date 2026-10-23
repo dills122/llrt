@@ -258,6 +258,70 @@ describe("fetch redirects", () => {
     expect(requests.some((r) => r.path === "/manual-denied")).toBe(false);
   });
 
+  for (const redirected of [false, true]) {
+    for (const explicitPort of [false, true]) {
+      const target = `https://127.0.0.1${explicitPort ? ":443" : ""}/https-policy`;
+      const description = `${redirected ? "redirected" : "direct"} HTTPS with ${explicitPort ? "explicit" : "implicit"} port`;
+      for (const entry of ["127.0.0.1", "127.0.0.1:443"]) {
+        it(`denies ${description} with ${entry}`, async () => {
+          const { LLRT_LOG, LLRT_NET_ALLOW, LLRT_NET_DENY, ...env } =
+            process.env;
+          const result = await spawnCapture(
+            process.argv[0],
+            [
+              "-e",
+              `fetch(${JSON.stringify(redirected ? start(target) : target)}).then(() => console.log("UNEXPECTED"), e => console.log(e.message))`,
+            ],
+            { env: { ...env, LLRT_NET_DENY: entry } }
+          );
+          expect(result.code).toBe(0);
+          expect(result.stdout.trim()).toBe(
+            `URL denied: 127.0.0.1${!redirected && explicitPort ? ":443" : ""}`
+          );
+        });
+        it(`allows ${description} through the allow check with ${entry}`, async () => {
+          const { LLRT_LOG, LLRT_NET_ALLOW, LLRT_NET_DENY, ...env } =
+            process.env;
+          // A matching deny rule proves the allow check passed, without a TLS
+          // listener or a connection to a privileged destination port.
+          const result = await spawnCapture(
+            process.argv[0],
+            [
+              "-e",
+              `fetch(${JSON.stringify(redirected ? start(target) : target)}).then(() => console.log("UNEXPECTED"), e => console.log(e.message))`,
+            ],
+            {
+              env: {
+                ...env,
+                LLRT_NET_ALLOW: `${origin} ${entry}`,
+                LLRT_NET_DENY: "127.0.0.1:443",
+              },
+            }
+          );
+          expect(result.code).toBe(0);
+          expect(result.stdout.trim()).toBe(
+            `URL denied: 127.0.0.1${!redirected && explicitPort ? ":443" : ""}`
+          );
+        });
+      }
+      it(`does not allow ${description} through a port-80-only rule`, async () => {
+        const { LLRT_LOG, LLRT_NET_ALLOW, LLRT_NET_DENY, ...env } = process.env;
+        const result = await spawnCapture(
+          process.argv[0],
+          [
+            "-e",
+            `fetch(${JSON.stringify(redirected ? start(target) : target)}).then(() => console.log("UNEXPECTED"), e => console.log(e.message))`,
+          ],
+          { env: { ...env, LLRT_NET_ALLOW: `${origin} 127.0.0.1:80` } }
+        );
+        expect(result.code).toBe(0);
+        expect(result.stdout.trim()).toBe(
+          `URL not allowed: 127.0.0.1${!redirected && explicitPort ? ":443" : ""}`
+        );
+      });
+    }
+  }
+
   it("still bounds relative redirect loops", async () => {
     await expect(fetch(origin + "/loop")).rejects.toThrow(
       "Max retries exceeded"

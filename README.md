@@ -656,6 +656,11 @@ Space-delimited list of hosts or socket paths which should be allowed for networ
 
 Space-delimited list of hosts or socket paths which should be denied for network connections
 
+For fetch requests, both lists match hosts and effective ports. A host without a
+port covers HTTP's default port 80 and HTTPS's default port 443. An explicit port
+restricts the entry to that port, regardless of scheme. Scheme prefixes in these
+lists are ignored. Deny rules take precedence over allow rules.
+
 ### `LLRT_NET_POOL_IDLE_TIMEOUT=value`
 
 Set a timeout in seconds for idle sockets being kept-alive. Default timeout is 15 seconds

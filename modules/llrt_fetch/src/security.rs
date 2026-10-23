@@ -56,11 +56,68 @@ fn url_restricted_error(ctx: &Ctx<'_>, message: &str, uri: &Uri) -> Error {
 
 fn url_match(list: &[Uri], uri: &Uri) -> bool {
     let host = uri.host().unwrap_or_default();
-    let port = uri.port_u16().unwrap_or(80);
+    let port = effective_port(uri);
     list.iter().any(|entry| {
         let entry_host = entry.host().unwrap_or_default();
-        let port_match = entry.port_u16().unwrap_or(80) == port;
+        let port_match = effective_port(entry) == port;
         let host_match = host == entry_host || host.ends_with(&format!(".{}", entry_host));
         port_match && host_match
     })
+}
+
+fn effective_port(uri: &Uri) -> u16 {
+    uri.port_u16().unwrap_or_else(|| {
+        if uri.scheme_str() == Some("https") {
+            443
+        } else {
+            80
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn matches_effective_http_ports() {
+        for (entry, target, expected) in [
+            ("https://example.com:443", "https://example.com/path", true),
+            ("https://example.com", "https://example.com:443/path", true),
+            ("https://example.com", "https://example.com/path", true),
+            ("http://example.com:80", "http://example.com/path", true),
+            ("http://example.com", "http://example.com:80/path", true),
+            ("http://example.com:80", "https://example.com/path", false),
+            ("https://example.com:443", "http://example.com/path", false),
+            (
+                "https://example.com",
+                "https://example.com:8443/path",
+                false,
+            ),
+            (
+                "https://example.com:8443",
+                "https://example.com:8443/path",
+                true,
+            ),
+            ("http://example.com:443", "https://example.com/path", true),
+            ("https://example.com:80", "http://example.com/path", true),
+            (
+                "https://example.com",
+                "https://sub.example.com:443/path",
+                true,
+            ),
+            (
+                "https://example.com",
+                "https://otherexample.com:443/path",
+                false,
+            ),
+        ] {
+            let list = [entry.parse().unwrap()];
+            assert_eq!(
+                url_match(&list, &target.parse().unwrap()),
+                expected,
+                "{entry} vs {target}"
+            );
+        }
+    }
 }
