@@ -318,6 +318,10 @@ Lightweight and fast hash classes for LLRT.
 
 ## module
 
+Package entry points ending in `.mjs` are loaded as ESM even when the package
+omits `type` or declares `"type": "commonjs"`. An `import` condition alone does not
+imply ESM: explicit `.cjs` targets remain CommonJS.
+
 When importing CommonJS, enumerable string keys other than `default` are exposed
 as named exports. Names that are not JavaScript binding identifiers can be imported
 with an alias, for example `import { "a-b" as name } from "./module.cjs"`.
