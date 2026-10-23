@@ -63,6 +63,24 @@ describe("import", () => {
     expect(mod.required.format).toBe("cjs entry");
   });
 
+  for (const order of ["import", "require"]) {
+    it(`should keep dual-package entry identities and execute each once with ${order} first`, async () => {
+      const { load } = await import(`${CWD}/fixtures/dual-format-order.mjs`);
+      const { imported, required, importedAgain, requiredAgain } =
+        await load(order);
+
+      expect(importedAgain).toBe(imported);
+      expect(requiredAgain).toBe(required);
+      expect(imported.default.format).toBe("esm");
+      expect(required.format).toBe("cjs");
+      expect(imported.default === required).toBe(false);
+      expect(Object.isFrozen(imported.default)).toBe(true);
+      expect(Object.keys(imported.default).sort()).toEqual(["format", "runs"]);
+      expect(imported.default.runs()).toBe(1);
+      expect(required.runs()).toBe(1);
+    });
+  }
+
   it("should import a CJS module with only a default export", async () => {
     const filename = `${CWD}/fixtures/default-only-export.cjs`;
     const mod = await import(filename);
