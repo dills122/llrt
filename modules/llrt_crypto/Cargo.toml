@@ -52,8 +52,10 @@ _rustcrypto = [
   "hmac",
   "md-5",
   "rsa",
-  "p256",
-  "p384",
+  "p256/ecdsa",
+  "p256/pkcs8",
+  "p384/ecdsa",
+  "p384/pkcs8",
   "p521",
   "pbkdf2",
   "sha1",
@@ -140,14 +142,10 @@ rsa = { version = "0.10.0-rc.19", features = [
 p256 = { version = "0.14", features = [
   "alloc",
   "ecdh",
-  "ecdsa",
-  "pkcs8",
 ], default-features = false, optional = true }
 p384 = { version = "0.14.0-rc.15", features = [
   "alloc",
   "ecdh",
-  "ecdsa",
-  "pkcs8",
 ], default-features = false, optional = true }
 p521 = { version = "0.14.0-rc.15", features = [
   "ecdh",
