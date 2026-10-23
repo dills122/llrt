@@ -322,6 +322,50 @@ describe("fetch redirects", () => {
     }
   }
 
+  for (const hostname of ["LOCALHOST", "127.1", "0x7f000001"]) {
+    for (const redirected of [false, true]) {
+      for (const restriction of ["LLRT_NET_ALLOW", "LLRT_NET_DENY"]) {
+        it(`matches ${restriction} for ${redirected ? "redirected" : "direct"} ${hostname}`, async () => {
+          const path = `/host-policy-${hostname}-${redirected}-${restriction}`;
+          const policyOrigin = otherOrigin.replace("127.0.0.1", hostname);
+          const target = policyOrigin + path;
+          const url = redirected ? start(target) : target;
+          const { LLRT_LOG, LLRT_NET_ALLOW, LLRT_NET_DENY, ...env } =
+            process.env;
+          const result = await spawnCapture(
+            process.argv[0],
+            [
+              "-e",
+              `fetch(${JSON.stringify(url)}).then(r => r.json()).then(r => console.log(r.path), e => console.log(e.message))`,
+            ],
+            {
+              env: {
+                ...env,
+                [restriction]:
+                  restriction === "LLRT_NET_ALLOW"
+                    ? `${origin} ${policyOrigin}`
+                    : policyOrigin,
+              },
+            }
+          );
+          expect(result.code).toBe(0);
+          if (restriction === "LLRT_NET_ALLOW") {
+            expect(result.stdout.trim()).toBe(path);
+            expect(requests.some((r) => r.path === path)).toBe(true);
+          } else {
+            // Direct errors preserve the input spelling; redirects expose the
+            // URL parser's canonical spelling. Both must stop before sending.
+            const host = redirected
+              ? new URL(target).host
+              : policyOrigin.slice(7);
+            expect(result.stdout.trim()).toBe(`URL denied: ${host}`);
+            expect(requests.some((r) => r.path === path)).toBe(false);
+          }
+        });
+      }
+    }
+  }
+
   it("still bounds relative redirect loops", async () => {
     await expect(fetch(origin + "/loop")).rejects.toThrow(
       "Max retries exceeded"

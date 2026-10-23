@@ -55,13 +55,30 @@ fn url_restricted_error(ctx: &Ctx<'_>, message: &str, uri: &Uri) -> Error {
 }
 
 fn url_match(list: &[Uri], uri: &Uri) -> bool {
-    let host = uri.host().unwrap_or_default();
+    let Some(host) = uri.host().and_then(|host| url::Host::parse(host).ok()) else {
+        return false;
+    };
     let port = effective_port(uri);
     list.iter().any(|entry| {
-        let entry_host = entry.host().unwrap_or_default();
-        let port_match = effective_port(entry) == port;
-        let host_match = host == entry_host || host.ends_with(&format!(".{}", entry_host));
-        port_match && host_match
+        if effective_port(entry) != port {
+            return false;
+        }
+        let Some(entry_host) = entry.host().and_then(|host| url::Host::parse(host).ok()) else {
+            return false;
+        };
+        match (&host, &entry_host) {
+            (url::Host::Domain(host), url::Host::Domain(entry)) => {
+                // A final dot denotes the DNS root, not a different host.
+                let host = host.strip_suffix('.').unwrap_or(host);
+                let entry = entry.strip_suffix('.').unwrap_or(entry);
+                host == entry
+                    || host
+                        .strip_suffix(entry)
+                        .is_some_and(|prefix| prefix.ends_with('.'))
+            },
+            // IP literals must match their canonical address, never a suffix.
+            _ => host == entry_host,
+        }
     })
 }
 
@@ -78,6 +95,36 @@ fn effective_port(uri: &Uri) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn matches_canonical_hosts_without_crossing_domain_boundaries() {
+        for (entry, target, expected) in [
+            ("EXAMPLE.COM", "example.com", true),
+            ("example.com", "SUB.EXAMPLE.COM", true),
+            ("example.com", "otherexample.com", false),
+            ("example.com", "example.com.attacker.test", false),
+            ("example.com.", "sub.example.com", true),
+            ("example.com", "sub.example.com.", true),
+            ("127.1", "127.0.0.1", true),
+            ("2130706433", "127.0.0.1", true),
+            ("0.0.1", "127.0.0.1", false),
+            ("0x7f000001", "127.0.0.1", true),
+            ("127.0.0.1", "127.1", true),
+            ("127.0.0.1", "127.0.0.2", false),
+            ("127.0.0.1", "evil.127.0.0.1", false),
+            ("[0:0:0:0:0:0:0:1]", "[::1]", true),
+            ("[::1]", "[::2]", false),
+            ("XN--BCHER-KVA.EXAMPLE", "xn--bcher-kva.example", true),
+        ] {
+            let entry: Uri = format!("http://{entry}:8080").parse().unwrap();
+            let target: Uri = format!("http://{target}:8080/path").parse().unwrap();
+            assert_eq!(
+                url_match(std::slice::from_ref(&entry), &target),
+                expected,
+                "{entry} vs {target}"
+            );
+        }
+    }
 
     #[test]
     fn matches_effective_http_ports() {
