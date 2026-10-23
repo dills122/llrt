@@ -325,7 +325,9 @@ imply ESM: explicit `.cjs` targets remain CommonJS.
 When importing CommonJS, enumerable string keys other than `default` are exposed
 as named exports, preserving embedded NUL characters. Names that are not JavaScript
 binding identifiers can be imported with an alias, for example
-`import { "a-b" as name } from "./module.cjs"`.
+`import { "a-b" as name } from "./module.cjs"`. Export names must be representable
+as UTF-8; names containing unpaired UTF-16 surrogates are not supported and cause
+the import to fail.
 
 The default import preserves `null` and `undefined` CommonJS exports. For an
 object with a `default` property, LLRT uses that property when it is truthy;

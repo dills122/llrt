@@ -63,6 +63,54 @@ describe("import", () => {
     expect(mod.required.format).toBe("cjs entry");
   });
 
+  it("should read the CJS default before named getters and retain collected keys", async () => {
+    const filename = `${CWD}/fixtures/cjs-getter-order.cjs`;
+    const mod = await import(filename);
+
+    expect(mod.default.events).toEqual(["default", "first"]);
+    expect(Object.keys(mod)).toEqual(["default", "first", "second"]);
+    expect(mod.first).toBe(1);
+    expect(mod.second).toBeUndefined();
+    expect(Object.hasOwn(mod.default, "second")).toBe(false);
+    expect(await import(filename)).toBe(mod);
+    expect(mod.default.events).toEqual(["default", "first"]);
+  });
+
+  it("should enumerate a CJS proxy before reading its default and named exports", async () => {
+    const filename = `${CWD}/fixtures/cjs-proxy-order.cjs`;
+    const mod = await import(filename);
+    const expected = [
+      "ownKeys",
+      "descriptor:named",
+      "get:default",
+      "get:named",
+    ];
+
+    expect(mod.default.events).toEqual(expected);
+    expect(mod.named).toBe(42);
+    expect(Object.keys(mod)).toEqual(["default", "named"]);
+    expect(await import(filename)).toBe(mod);
+    expect(mod.default.events).toEqual(expected);
+  });
+
+  for (const order of ["import", "require"]) {
+    it(`should keep dual-package entry identities and execute each once with ${order} first`, async () => {
+      const { load } = await import(`${CWD}/fixtures/dual-format-order.mjs`);
+      const { imported, required, importedAgain, requiredAgain } =
+        await load(order);
+
+      expect(importedAgain).toBe(imported);
+      expect(requiredAgain).toBe(required);
+      expect(imported.default.format).toBe("esm");
+      expect(required.format).toBe("cjs");
+      expect(imported.default === required).toBe(false);
+      expect(Object.isFrozen(imported.default)).toBe(true);
+      expect(Object.keys(imported.default).sort()).toEqual(["format", "runs"]);
+      expect(imported.default.runs()).toBe(1);
+      expect(required.runs()).toBe(1);
+    });
+  }
+
   it("should import a CJS module with only a default export", async () => {
     const filename = `${CWD}/fixtures/default-only-export.cjs`;
     const mod = await import(filename);
