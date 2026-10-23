@@ -9,4 +9,6 @@ module.exports = {
   "a\nb": 8,
   __llrt_export_0: 9,
   π: 10,
+  e0: 11,
+  e1: 12,
 };
