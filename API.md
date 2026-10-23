@@ -323,6 +323,17 @@ treats the target as ESM regardless of the package's `type` field. An explicit
 `.cjs` target remains CommonJS. `require` does not select the `module` field; it
 uses the applicable `exports` or platform entry, or falls back to `main`.
 
+When importing CommonJS, enumerable string keys other than `default` are exposed
+as named exports, preserving embedded NUL characters. Names that are not JavaScript
+binding identifiers can be imported with an alias, for example
+`import { "a-b" as name } from "./module.cjs"`. Export names must be representable
+as UTF-8; names containing unpaired UTF-16 surrogates are not supported and cause
+the import to fail.
+
+The default import preserves `null` and `undefined` CommonJS exports. For an
+object with a `default` property, LLRT uses that property when it is truthy;
+otherwise the default import is the exported object.
+
 [builtinModules](https://nodejs.org/api/module.html#modulebuiltinmodules)
 
 [createRequire](https://nodejs.org/api/module.html#modulecreaterequirefilename)
