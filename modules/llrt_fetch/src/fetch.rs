@@ -446,17 +446,10 @@ async fn send<'js>(
             break (retried, guard);
         }
 
-        if status.is_redirection() {
-            match res.headers().get(&LOCATION) {
-                Some(location_headers) => {
-                    if let Ok(location_str) = location_headers.to_str() {
-                        *uri = location_str.parse().or_throw(ctx)?;
-                        ensure_url_access(ctx, uri)?;
-                    }
-                },
-                None => break (res, guard),
-            };
-        } else {
+        if !status.is_redirection() {
+            break (res, guard);
+        }
+        let Some(location) = res.headers().get(LOCATION) else {
             break (res, guard);
         };
 
@@ -470,6 +463,23 @@ async fn send<'js>(
         if redirect_count >= MAX_REDIRECT_COUNT {
             return Err(Exception::throw_message(ctx, "Max retries exceeded"));
         }
+
+        // Resolve against the current response URL, not the initial request URL.
+        // Manual/error modes must not follow or replace the response's URL.
+        let location = location
+            .to_str()
+            .or_throw_type(ctx, "Invalid redirect URL")?;
+        let mut target = url::Url::parse(&uri.to_string())
+            .and_then(|base| base.join(location))
+            .or_throw_type(ctx, "Invalid redirect URL")?;
+        // Fragments are not sent in HTTP requests or exposed in Response.url.
+        target.set_fragment(None);
+        let target = target
+            .as_str()
+            .parse::<Uri>()
+            .or_throw_type(ctx, "Invalid redirect URL")?;
+        ensure_url_access(ctx, &target)?;
+        *uri = target;
 
         response_status = res.status().as_u16();
     };
