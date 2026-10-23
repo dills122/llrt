@@ -1,6 +1,6 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
-use std::{cell::RefCell, fs::File, io::Read};
+use std::{cell::RefCell, fmt::Write, fs::File, io::Read};
 
 use llrt_json::escape::escape_json_string;
 use llrt_utils::result::ResultExt;
@@ -25,34 +25,15 @@ impl PackageLoader {
         module.push_str("const value = require(\"");
 
         module.push_str(name);
-        module.push_str("\");export default value.default||value;");
+        module.push_str("\");export default value?.default||value;");
         if let Some(obj) = export_object.as_object() {
-            let keys: Result<Vec<String>> = obj.keys().collect();
+            // Atom-to-Rust-string conversion truncates at NUL; JS strings retain the length.
+            let keys: Result<Vec<String>> = obj
+                .keys::<rquickjs::String>()
+                .map(|key| key?.to_string())
+                .collect();
             let keys = keys?;
-
-            if !keys.is_empty() {
-                module.push_str("const{");
-
-                for p in keys.iter() {
-                    if p == "default" {
-                        continue;
-                    }
-                    module.push_str(p);
-                    module.push(',');
-                }
-                module.truncate(module.len() - 1);
-                module.push_str("}=value;");
-                module.push_str("export{");
-                for p in keys.iter() {
-                    if p == "default" {
-                        continue;
-                    }
-                    module.push_str(p);
-                    module.push(',');
-                }
-                module.truncate(module.len() - 1);
-                module.push_str("};");
-            }
+            append_named_exports(&mut module, &keys);
         }
         Module::declare(ctx, name, module)
     }
@@ -164,5 +145,53 @@ impl Loader for PackageLoader {
         }
 
         Ok(module)
+    }
+}
+
+fn append_named_exports(module: &mut String, keys: &[String]) {
+    let keys = keys.iter().filter(|key| key.as_str() != "default");
+    if keys.clone().next().is_none() {
+        return;
+    }
+
+    // Keep property reads in key order, with local names independent of export names.
+    let mut escaped = String::new();
+    module.push_str("const ");
+    for (index, key) in keys.clone().enumerate() {
+        if index != 0 {
+            module.push(',');
+        }
+        escaped.clear();
+        escape_json_string(&mut escaped, key.as_bytes());
+        write!(module, "e{index}=value[\"{escaped}\"]").unwrap();
+    }
+    module.push_str(";export{");
+    for (index, key) in keys.enumerate() {
+        if index != 0 {
+            module.push(',');
+        }
+        escaped.clear();
+        escape_json_string(&mut escaped, key.as_bytes());
+        write!(module, "e{index} as\"{escaped}\"").unwrap();
+    }
+    module.push_str("};");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cjs_module_with_only_default_export_has_valid_syntax() {
+        let mut source =
+            String::from("const value = require(\"pkg\");export default value?.default||value;");
+        append_named_exports(&mut source, &["default".to_string()]);
+
+        let runtime = rquickjs::Runtime::new().unwrap();
+        let context = rquickjs::Context::full(&runtime).unwrap();
+
+        context.with(|ctx| {
+            Module::declare(ctx, "test", source).unwrap();
+        });
     }
 }
