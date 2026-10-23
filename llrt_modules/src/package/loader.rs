@@ -27,7 +27,11 @@ impl PackageLoader {
         module.push_str(name);
         module.push_str("\");export default value?.default||value;");
         if let Some(obj) = export_object.as_object() {
-            let keys: Result<Vec<String>> = obj.keys().collect();
+            // Atom-to-Rust-string conversion truncates at NUL; JS strings retain the length.
+            let keys: Result<Vec<String>> = obj
+                .keys::<rquickjs::String>()
+                .map(|key| key?.to_string())
+                .collect();
             let keys = keys?;
             append_named_exports(&mut module, &keys);
         }

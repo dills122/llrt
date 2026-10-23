@@ -106,6 +106,42 @@ describe("import", () => {
     expect(mod.hyphenated).toBe(3);
   });
 
+  it("should preserve NUL characters in CJS export names without collisions", async () => {
+    const filename = `${CWD}/fixtures/cjs-nul-export-names.cjs`;
+    const mod = await import(filename);
+    const expected = {
+      "": 1,
+      "\u0000": 2,
+      abc: 3,
+      "abc\u0000def": 4,
+      "abc\u0000ghi": 5,
+      "trailing\u0000": 6,
+      "default\u0000suffix": 7,
+      "π\u0000尾": 8,
+    };
+
+    expect(Object.keys(mod).sort()).toEqual(
+      [...Object.keys(expected), "default"].sort()
+    );
+    expect(Object.keys(mod.default).sort()).toEqual(
+      Object.keys(expected).sort()
+    );
+    for (const [key, value] of Object.entries(expected)) {
+      expect(mod[key]).toBe(value);
+      expect(mod.default[key]).toBe(value);
+    }
+  });
+
+  it("should support static imports of CJS names containing NUL", async () => {
+    const filename = `${CWD}/fixtures/cjs-nul-export-names.mjs`;
+    const mod = await import(filename);
+
+    expect(mod.leading).toBe(2);
+    expect(mod.embedded).toBe(4);
+    expect(mod.trailing).toBe(6);
+    expect(mod.defaultPrefix).toBe(7);
+  });
+
   for (const [name, expected] of [
     ["null", null],
     ["undefined", undefined],
