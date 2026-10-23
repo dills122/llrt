@@ -838,6 +838,9 @@ export function print(value: any): void;
 
 [fetch](https://developer.mozilla.org/en-US/docs/Web/API/Headers)
 
+Fetch resolves relative `Location` headers against the current response URL when
+following redirects. With `redirect: "manual"`, the response retains its source URL.
+
 > [!IMPORTANT]
 > There are some differences with the [WHATWG standard](https://fetch.spec.whatwg.org). Mainly browser specific behavior is removed:
 >

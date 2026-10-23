@@ -446,17 +446,10 @@ async fn send<'js>(
             break (retried, guard);
         }
 
-        if status.is_redirection() {
-            match res.headers().get(&LOCATION) {
-                Some(location_headers) => {
-                    if let Ok(location_str) = location_headers.to_str() {
-                        *uri = location_str.parse().or_throw(ctx)?;
-                        ensure_url_access(ctx, uri)?;
-                    }
-                },
-                None => break (res, guard),
-            };
-        } else {
+        if !status.is_redirection() {
+            break (res, guard);
+        }
+        let Some(location) = res.headers().get(LOCATION) else {
             break (res, guard);
         };
 
@@ -470,6 +463,23 @@ async fn send<'js>(
         if redirect_count >= MAX_REDIRECT_COUNT {
             return Err(Exception::throw_message(ctx, "Max retries exceeded"));
         }
+
+        // Resolve against the current response URL, not the initial request URL.
+        // Manual/error modes must not follow or replace the response's URL.
+        let location = location
+            .to_str()
+            .or_throw_type(ctx, "Invalid redirect URL")?;
+        let mut target = url::Url::parse(&uri.to_string())
+            .and_then(|base| base.join(location))
+            .or_throw_type(ctx, "Invalid redirect URL")?;
+        // Fragments are not sent in HTTP requests or exposed in Response.url.
+        target.set_fragment(None);
+        let target = target
+            .as_str()
+            .parse::<Uri>()
+            .or_throw_type(ctx, "Invalid redirect URL")?;
+        ensure_url_access(ctx, &target)?;
+        *uri = target;
 
         response_status = res.status().as_u16();
     };
@@ -653,11 +663,29 @@ fn is_same_scheme(uri: &Uri, initial_uri: &Uri) -> bool {
 }
 
 fn is_same_host(uri: &Uri, initial_uri: &Uri) -> bool {
-    uri.host() == initial_uri.host()
+    match (uri.host(), initial_uri.host()) {
+        // Most requests need no URL parsing or allocation.
+        (Some(host), Some(initial_host)) if host.eq_ignore_ascii_case(initial_host) => true,
+        (Some(host), Some(initial_host)) => {
+            // URL resolution also canonicalizes IP literals and encoded domains.
+            match (url::Host::parse(host), url::Host::parse(initial_host)) {
+                (Ok(host), Ok(initial_host)) => host == initial_host,
+                _ => false,
+            }
+        },
+        _ => false,
+    }
 }
 
 fn is_same_port(uri: &Uri, initial_uri: &Uri) -> bool {
-    uri.authority().and_then(|a| a.port()) == initial_uri.authority().and_then(|a| a.port())
+    let effective_port = |uri: &Uri| {
+        uri.port_u16().or_else(|| match uri.scheme_str() {
+            Some("http") => Some(80),
+            Some("https") => Some(443),
+            _ => None,
+        })
+    };
+    effective_port(uri) == effective_port(initial_uri)
 }
 
 fn should_change_method(prev_status: u16, method: &Method) -> bool {
@@ -1093,6 +1121,38 @@ mod tests {
         let uri8 = Uri::from_static("https://example.com:8081/path");
 
         assert!(!is_same_origin(&uri7, &uri8));
+    }
+
+    #[test]
+    fn test_same_origin_normalization() {
+        for (left, right) in [
+            ("http://LOCALHOST:1234/start", "http://localhost:1234/end"),
+            ("http://example.com:80/start", "http://example.com/end"),
+            ("https://example.com:443/start", "https://example.com/end"),
+            ("http://127.1/start", "http://127.0.0.1/end"),
+            ("http://[0:0:0:0:0:0:0:1]/start", "http://[::1]/end"),
+        ] {
+            let left: Uri = left.parse().unwrap();
+            let right: Uri = right.parse().unwrap();
+            assert!(is_same_origin(&left, &right), "{left} vs {right}");
+            assert!(is_same_origin(&right, &left), "{right} vs {left}");
+        }
+    }
+
+    #[test]
+    fn test_normalization_keeps_distinct_origins_separate() {
+        for (left, right) in [
+            ("http://example.com:80", "https://example.com:443"),
+            ("http://example.com:80", "http://example.com:8080"),
+            ("https://example.com:443", "https://other.example:443"),
+            ("https://example.com:80", "https://example.com"),
+            ("http://[::1]", "http://[::2]"),
+        ] {
+            assert!(!is_same_origin(
+                &left.parse().unwrap(),
+                &right.parse().unwrap()
+            ));
+        }
     }
 
     #[test]
