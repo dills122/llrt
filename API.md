@@ -318,6 +318,11 @@ Lightweight and fast hash classes for LLRT.
 
 ## module
 
+When ESM package resolution selects the `module` field in `package.json`, LLRT
+treats the target as ESM regardless of the package's `type` field. An explicit
+`.cjs` target remains CommonJS. `require` does not select the `module` field; it
+uses the applicable `exports` or platform entry, or falls back to `main`.
+
 [builtinModules](https://nodejs.org/api/module.html#modulebuiltinmodules)
 
 [createRequire](https://nodejs.org/api/module.html#modulecreaterequirefilename)
