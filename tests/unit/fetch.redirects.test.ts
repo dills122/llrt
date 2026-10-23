@@ -192,6 +192,18 @@ describe("fetch redirects", () => {
     });
   }
 
+  for (const relative of [false, true]) {
+    it(`retains authorization with a mixed-case hostname and ${relative ? "relative" : "absolute"} Location`, async () => {
+      const localOrigin = origin.replace("127.0.0.1", "LOCALHOST");
+      const location = relative ? "../case-auth" : localOrigin + "/case-auth";
+      const url = start(location).replace(origin, localOrigin);
+      const response = await fetch(url, {
+        headers: { authorization: "Bearer case-test" },
+      });
+      expect((await response.json()).authorization).toBe("Bearer case-test");
+    });
+  }
+
   it("retains same-origin authorization and strips it across a scheme-relative redirect", async () => {
     const headers = { authorization: "Bearer test" };
     const same = await fetch(start("../same-auth"), { headers });
