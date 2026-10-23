@@ -838,6 +838,9 @@ export function print(value: any): void;
 
 [fetch](https://developer.mozilla.org/en-US/docs/Web/API/Headers)
 
+Repeated response header values are combined with a comma and space when read through
+`Headers`. `getSetCookie()` preserves separate `Set-Cookie` values.
+
 Fetch resolves relative `Location` headers against the current response URL when
 following redirects. With `redirect: "manual"`, the response retains its source URL.
 
