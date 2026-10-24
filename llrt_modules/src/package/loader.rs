@@ -149,18 +149,32 @@ impl Loader for PackageLoader {
 }
 
 fn append_named_exports(module: &mut String, keys: &[String]) {
+    let keys = keys.iter().filter(|key| key.as_str() != "default");
+    if keys.clone().next().is_none() {
+        return;
+    }
+
+    // Keep property reads in key order, with local names independent of export names.
     let mut escaped = String::new();
-    for (index, key) in keys
-        .iter()
-        .filter(|key| key.as_str() != "default")
-        .enumerate()
-    {
-        // Property names need not be valid bindings and may collide with `value`.
+    module.push_str("const ");
+    for (index, key) in keys.clone().enumerate() {
+        if index != 0 {
+            module.push(',');
+        }
         escaped.clear();
         escape_json_string(&mut escaped, key.as_bytes());
-        write!(module, "const __llrt_export_{index}=value[\"{escaped}\"];").unwrap();
-        write!(module, "export{{__llrt_export_{index} as \"{escaped}\"}};").unwrap();
+        write!(module, "e{index}=value[\"{escaped}\"]").unwrap();
     }
+    module.push_str(";export{");
+    for (index, key) in keys.enumerate() {
+        if index != 0 {
+            module.push(',');
+        }
+        escaped.clear();
+        escape_json_string(&mut escaped, key.as_bytes());
+        write!(module, "e{index} as\"{escaped}\"").unwrap();
+    }
+    module.push_str("};");
 }
 
 #[cfg(test)]
