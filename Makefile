@@ -270,7 +270,9 @@ test-wpt: setup-wpt js
 	done; \
 	npx pretty-quick --pattern "tests/wpt/**/*.{js,ts,json}"; \
 	TEST_REPORT_FILE=wpt_errors.txt cargo run --features intl402 -- test -d bundle/js/__tests__/$(TEST_SUB_DIR); \
-	kill $$WPT_PID 2>/dev/null
+	test_status=$$?; \
+	kill $$WPT_PID 2>/dev/null || :; \
+	exit $$test_status
 
 # Run the WPT suite and compare the failing-test list (wpt_errors.txt, written
 # by test-wpt) against the committed baseline. Fails on any difference: a new
