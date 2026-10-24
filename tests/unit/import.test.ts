@@ -90,6 +90,34 @@ describe("import", () => {
     expect(mod.default()).toBe("hello from default");
   });
 
+  for (const name of [
+    "mjs-exports-regression",
+    "mjs-commonjs-regression",
+    "mjs-main-regression",
+    "mjs-commonjs-regression/entry",
+  ]) {
+    it(`should load the mjs target of ${name} as ESM`, async () => {
+      const filename = `${CWD}/fixtures/package-targets.mjs`;
+      const { importPackage } = await import(filename);
+      const mod = await importPackage(name);
+
+      expect(mod.default).toEqual({ format: "esm" });
+      expect(Object.isFrozen(mod.default)).toBe(true);
+    });
+  }
+
+  it("should keep require conditions and explicit cjs targets as CommonJS", async () => {
+    const filename = `${CWD}/fixtures/package-targets.mjs`;
+    const { importPackage, requirePackage } = await import(filename);
+
+    for (const name of ["mjs-exports-regression", "mjs-commonjs-regression"]) {
+      expect(requirePackage(name)).toEqual({ format: "cjs" });
+    }
+    const mod = await importPackage("cjs-module-regression");
+    expect(mod.default).toEqual({ format: "cjs" });
+    expect(requirePackage("cjs-module-regression")).toEqual({ format: "cjs" });
+  });
+
   it("regression testing for issue #1492", async () => {
     await import(`${CWD}/fixtures/test1492/index.js`);
   });

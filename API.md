@@ -323,6 +323,10 @@ treats the target as ESM regardless of the package's `type` field. An explicit
 `.cjs` target remains CommonJS. `require` does not select the `module` field; it
 uses the applicable `exports` or platform entry, or falls back to `main`.
 
+Package entry points ending in `.mjs` are loaded as ESM even when the package
+omits `type` or declares `"type": "commonjs"`. An `import` condition alone does not
+imply ESM: explicit `.cjs` targets remain CommonJS.
+
 [builtinModules](https://nodejs.org/api/module.html#modulebuiltinmodules)
 
 [createRequire](https://nodejs.org/api/module.html#modulecreaterequirefilename)
