@@ -53,6 +53,43 @@ describe("import", () => {
     ).toEqual(true);
   });
 
+  it("should use module for import and main for require in a dual package", async () => {
+    // Keep the bare package import in an unbundled fixture so LLRT resolves it.
+    const filename = `${CWD}/fixtures/dual-format-import.mjs`;
+    const mod = await import(filename);
+
+    expect(Object.keys(mod.imported)).toEqual(["format"]);
+    expect(mod.imported.format).toBe("esm entry");
+    expect(mod.required.format).toBe("cjs entry");
+  });
+
+  for (const order of ["import", "require"]) {
+    it(`should keep dual-package entry identities and execute each once with ${order} first`, async () => {
+      const { load } = await import(`${CWD}/fixtures/dual-format-order.mjs`);
+      const { imported, required, importedAgain, requiredAgain } =
+        await load(order);
+
+      expect(importedAgain).toBe(imported);
+      expect(requiredAgain).toBe(required);
+      expect(imported.default.format).toBe("esm");
+      expect(required.format).toBe("cjs");
+      expect(imported.default === required).toBe(false);
+      expect(Object.isFrozen(imported.default)).toBe(true);
+      expect(Object.keys(imported.default).sort()).toEqual(["format", "runs"]);
+      expect(imported.default.runs()).toBe(1);
+      expect(required.runs()).toBe(1);
+    });
+  }
+
+  it("should import a CJS module with only a default export", async () => {
+    const filename = `${CWD}/fixtures/default-only-export.cjs`;
+    const mod = await import(filename);
+
+    expect(Object.keys(mod)).toEqual(["default"]);
+    expect(typeof mod.default).toBe("function");
+    expect(mod.default()).toBe("hello from default");
+  });
+
   it("regression testing for issue #1492", async () => {
     await import(`${CWD}/fixtures/test1492/index.js`);
   });
